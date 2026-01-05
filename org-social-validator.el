@@ -96,7 +96,7 @@ Optional SUGGESTION provides a hint to fix the error."
                           error-count
                           (or org-social-validator--current-file "buffer")))
           (insert "For more information about the Org Social specification, visit:\n")
-          (insert "https://github.com/tanrax/org-social\n\n")
+          (insert "https://org-social.org/\n\n")
           (insert (make-string 70 ?─) "\n\n")
           (dolist (error (reverse org-social-validator--errors))
             (insert (org-social-validator--format-error error))
@@ -349,7 +349,23 @@ prefer-utf-8-unix."
          (content-begin (org-element-property :contents-begin element))
          (content-end (org-element-property :contents-end element))
          (post-data '())
-         (found-properties '()))
+         (found-properties '())
+         (id-in-header nil))
+
+    ;; Check for ID in header (Org Social v1.6 format: ** TIMESTAMP)
+    (save-excursion
+      (goto-char post-line)
+      (beginning-of-line)
+      (when (looking-at "^\\*\\*\\s-+\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}T[0-9]\\{2\\}:[0-9]\\{2\\}:[0-9]\\{2\\}[+-][0-9]\\{2\\}\\(:[0-9]\\{2\\}\\|[0-9]\\{2\\}\\)\\)")
+        (setq id-in-header (match-string 1))
+        ;; Validate the ID format
+        (unless (string-match org-social-validator--rfc3339-regexp id-in-header)
+          (org-social-validator--error
+           post-line 1
+           (format "Invalid ID format in header: %s" id-in-header)
+           "ID must be RFC 3339 format, e.g., 2025-05-01T12:00:00+0100 or 2025-05-01T12:00:00-0200"))
+        ;; Mark ID as found
+        (push "ID" found-properties)))
 
     ;; Parse properties
     (save-excursion
@@ -378,13 +394,13 @@ prefer-utf-8-unix."
                 ;; Store property (even if unknown, for completeness)
                 (push (cons prop value) post-data)))))))
 
-    ;; Check for missing required properties
+    ;; Check for missing required properties (ID can be in header OR properties)
     (dolist (req org-social-validator--required-properties)
       (unless (member req found-properties)
         (org-social-validator--error
          post-line 1
          (format "Missing required property: :%s:" req)
-         "Every post must have an :ID: property with RFC 3339 format datetime")))
+         "Every post must have an :ID: in the header (** TIMESTAMP) or as a property (:ID:)")))
 
     ;; Parse content
     (when (and content-begin content-end)
@@ -410,6 +426,72 @@ prefer-utf-8-unix."
          "Poll post with :POLL_END: must contain checkbox list items"
          "Add poll options like:\n- [ ] Option 1\n- [ ] Option 2")))))
 
+(defun org-social-validator--parse-post-manually (post-begin)
+  "Parse and validate a post starting at POST-BEGIN using regex.
+This is used when org-element cannot parse the headline
+(e.g., \\='**\\=' without space)."
+  (let ((post-line (line-number-at-pos post-begin))
+        (post-data '())
+        (found-properties '())
+        (id-in-header nil)
+        (post-end nil))
+
+    ;; Find the end of this post (next ** or end of buffer)
+    (save-excursion
+      (goto-char post-begin)
+      (forward-line 1)
+      (if (re-search-forward "^\\*\\*\\($\\|[^*]\\)" nil t)
+          (setq post-end (line-beginning-position))
+        (setq post-end (point-max))))
+
+    ;; Check for ID in header (v1.6 format)
+    (save-excursion
+      (goto-char post-begin)
+      (when (looking-at "^\\*\\*\\s-+\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}T[0-9]\\{2\\}:[0-9]\\{2\\}:[0-9]\\{2\\}[+-][0-9]\\{2\\}\\(:[0-9]\\{2\\}\\|[0-9]\\{2\\}\\)\\)")
+        (setq id-in-header (match-string 1))
+        (unless (string-match org-social-validator--rfc3339-regexp id-in-header)
+          (org-social-validator--error
+           post-line 1
+           (format "Invalid ID format in header: %s" id-in-header)
+           "ID must be RFC 3339 format, e.g., 2025-05-01T12:00:00+0100"))
+        (push "ID" found-properties)))
+
+    ;; Parse properties
+    (save-excursion
+      (goto-char post-begin)
+      (when (re-search-forward ":PROPERTIES:" post-end t)
+        (let ((props-start (point))
+              (props-end (when (re-search-forward "^:END:" post-end t)
+                           (line-beginning-position))))
+          (when props-end
+            (goto-char props-start)
+            (while (re-search-forward "^:\\([A-Z_]+\\):\\s-*\\(.+\\)$" props-end t)
+              (let ((prop (match-string 1))
+                    (value (match-string 2)))
+                (when (member prop org-social-validator--known-properties)
+                  (org-social-validator--validate-property prop value post-line))
+                (when (member prop org-social-validator--required-properties)
+                  (push prop found-properties))
+                (push (cons prop value) post-data)))))))
+
+    ;; Check for missing required properties
+    (dolist (req org-social-validator--required-properties)
+      (unless (member req found-properties)
+        (org-social-validator--error
+         post-line 1
+         (format "Missing required property: :%s:" req)
+         "Every post must have an :ID: in the header (** TIMESTAMP) or as a property (:ID:)")))
+
+    ;; Validate poll if POLL_END is present
+    (when (assoc "POLL_END" post-data)
+      (save-excursion
+        (goto-char post-begin)
+        (forward-line 1)
+        (let ((content-start (point)))
+          (org-social-validator--validate-poll post-line content-start post-end))))
+
+    (nreverse post-data)))
+
 (defun org-social-validator--parse-posts ()
   "Parse and validate all posts in the '* Posts' section."
   (let ((posts '())
@@ -433,13 +515,21 @@ prefer-utf-8-unix."
     (when posts-start
       (save-excursion
         (goto-char posts-start)
-        (let ((tree (org-element-parse-buffer)))
-          (org-element-map tree 'headline
-			   (lambda (hl)
-			     (when (and (= (org-element-property :level hl) 2)
-					(> (org-element-property :begin hl) posts-start))
-			       (let ((post (org-social-validator--parse-post hl)))
-				 (push post posts))))))))
+        ;; Find all level-2 headlines using regex (same as parser)
+        (while (re-search-forward "^\\*\\*\\($\\|[^*]\\)" nil t)
+          (let ((post-begin (line-beginning-position)))
+            ;; Try to use org-element, but if it fails, still validate the post
+            (goto-char post-begin)
+            (let ((element (ignore-errors (org-element-at-point))))
+              (if (and element
+                       (eq (org-element-type element) 'headline)
+                       (= (org-element-property :level element) 2))
+                  ;; Use org-element if available
+                  (push (org-social-validator--parse-post element) posts)
+                ;; Otherwise, validate manually
+                (push (org-social-validator--parse-post-manually post-begin) posts)))
+            ;; Move to next line to continue search
+            (forward-line 1)))))
 
     (nreverse posts)))
 
