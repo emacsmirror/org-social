@@ -1,5 +1,18 @@
 # 📝 Changelog
 
+## 2.10
+
+- **Org Social v1.6 Specification Support**:
+  - Post IDs can now be specified in the header: `** 2025-01-05T10:00:00+0100`
+  - New global metadata fields:
+    - `#+LOCATION:` - User location (city, country)
+    - `#+BIRTHDAY:` - User birthday in YYYY-MM-DD format
+    - `#+LANGUAGE:` - Space-separated language codes (ISO 639-1) the user speaks
+    - `#+PINNED:` - Post ID to pin to the top of the profile
+  - Profile UI now displays location (📍), birthday (🎂), and languages (🗣️)
+  - Pinned posts are highlighted with 📌 in profile view
+- **ID Migration Tool**: New `org-social-migrate-ids-to-header` command (M-x)
+
 ## 2.9
 
 - Feature: VISIBILITY property support (Org Social specification v1.5)

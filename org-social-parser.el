@@ -3,7 +3,7 @@
 ;; SPDX-License-Identifier: GPL-3.0
 
 ;; Author: Andros Fenollosa <hi@andros.dev>
-;; Version: 2.9
+;; Version: 2.10
 ;; URL: https://github.com/tanrax/org-social.el
 
 ;; This file is NOT part of GNU Emacs.
@@ -132,6 +132,10 @@ space-separated token."
          (cons 'title (org-social-parser--get-value feed "TITLE"))
          (cons 'description (org-social-parser--get-value feed "DESCRIPTION"))
          (cons 'avatar (org-social-parser--get-value feed "AVATAR"))
+         (cons 'location (org-social-parser--get-value feed "LOCATION"))
+         (cons 'birthday (org-social-parser--get-value feed "BIRTHDAY"))
+         (cons 'language (org-social-parser--get-value feed "LANGUAGE"))
+         (cons 'pinned (org-social-parser--get-value feed "PINNED"))
          (cons 'url (or org-social-my-public-url org-social-file))  ; Use public URL if available, fallback to file path
          (cons 'follow (mapcar #'org-social-parser--parse-follow (delq nil follows-list)))
          (cons 'group (mapcar #'org-social-parser--parse-group (delq nil groups-list)))
@@ -161,11 +165,19 @@ Validates format according to specification - ignores invalid values."
         (insert feed)
         (goto-char (point-min))
         (when (re-search-forward "^\\* Posts" nil t)
-          (while (re-search-forward "^\\*\\*[^*]" nil t)
+          (while (re-search-forward "^\\*\\*\\($\\|[^*]\\)" nil t)
             (let ((post-start (point))
-                  post-end id text date properties-text)
+                  post-end id id-from-header id-from-properties text date properties-text)
+              ;; Extract ID from header (after **)
+              (beginning-of-line)
+              (when (looking-at "^\\*\\*\\s-+\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}T[0-9]\\{2\\}:[0-9]\\{2\\}:[0-9]\\{2\\}[+-][0-9]\\{2\\}\\(:[0-9]\\{2\\}\\|[0-9]\\{2\\}\\)\\)")
+                (setq id-from-header (match-string 1)))
+              (end-of-line)
+              (forward-char)
+              (setq post-start (point))
+
               ;; Find the end of this post (next ** or end of buffer)
-              (if (re-search-forward "^\\*\\*[^*]" nil t)
+              (if (re-search-forward "^\\*\\*\\($\\|[^*]\\)" nil t)
                   (progn
                     (backward-char)  ; Move back to the line with **
                     (beginning-of-line)
@@ -180,8 +192,12 @@ Validates format according to specification - ignores invalid values."
                   (when (re-search-forward ":END:" post-end t)
                     (setq properties-text (buffer-substring-no-properties prop-start (point))))))
 
-              ;; Extract basic required properties
-              (setq id (org-social-parser--extract-property properties-text "ID"))
+              ;; Extract ID from properties
+              (setq id-from-properties (org-social-parser--extract-property properties-text "ID"))
+
+              ;; Use ID from header if present, otherwise use ID from properties
+              ;; According to Org Social spec v1.6: if both are present, header takes priority
+              (setq id (or id-from-header id-from-properties))
               (when id (setq date (safe-date-to-time id)))
 
               ;; Extract text content (after :END:)
@@ -203,7 +219,8 @@ Validates format according to specification - ignores invalid values."
                   (setq text (string-trim (string-join (reverse content-lines) "\n")))))
 
               ;; Add post if we have required data
-              (when (and id text date properties-text)
+              ;; Properties are optional, so we only require id, text, and date
+              (when (and id text date)
                 (let ((post-data (list
                                   (cons 'id (gensym))
                                   (cons 'timestamp id)

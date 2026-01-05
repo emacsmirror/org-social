@@ -157,10 +157,15 @@
          (nick (org-social-parser--get-value feed-data "NICK"))
          (description (org-social-parser--get-value feed-data "DESCRIPTION"))
          (avatar (org-social-parser--get-value feed-data "AVATAR"))
+         (location (org-social-parser--get-value feed-data "LOCATION"))
+         (birthday (org-social-parser--get-value feed-data "BIRTHDAY"))
+         (language (org-social-parser--get-value feed-data "LANGUAGE"))
+         (pinned-id (org-social-parser--get-value feed-data "PINNED"))
          (links (org-social-parser--get-value feed-data "LINK"))
          (contacts (org-social-parser--get-value feed-data "CONTACT"))
          (follows (org-social-parser--get-value feed-data "FOLLOW"))
-         (groups (org-social-parser--get-value feed-data "GROUP")))
+         (groups (org-social-parser--get-value feed-data "GROUP"))
+         (all-posts (org-social-parser--get-posts-from-feed feed-data)))
 
     ;; Avatar section (moved above nick)
     (when (and avatar (not (string-empty-p avatar)))
@@ -196,6 +201,21 @@
     (when (and description (not (string-empty-p description)))
       (org-social-ui--insert-formatted-text "Description: " 'bold "#ffaa00")
       (org-social-ui--insert-formatted-text (format "%s\n" description)))
+
+    ;; Location section
+    (when (and location (not (string-empty-p location)))
+      (org-social-ui--insert-formatted-text "Location: " 'bold "#ffaa00")
+      (org-social-ui--insert-formatted-text (format "📍 %s\n" location)))
+
+    ;; Birthday section
+    (when (and birthday (not (string-empty-p birthday)))
+      (org-social-ui--insert-formatted-text "Birthday: " 'bold "#ffaa00")
+      (org-social-ui--insert-formatted-text (format "🎂 %s\n" birthday)))
+
+    ;; Language section
+    (when (and language (not (string-empty-p language)))
+      (org-social-ui--insert-formatted-text "Languages: " 'bold "#ffaa00")
+      (org-social-ui--insert-formatted-text (format "🗣️ %s\n" language)))
 
     ;; Profile URL section
     (org-social-ui--insert-formatted-text "URL: " 'bold "#ffaa00")
@@ -269,7 +289,23 @@
         (dolist (group groups-list)
           (org-social-ui--insert-formatted-text "  • ")
           (org-social-ui--insert-formatted-text group)
-          (org-social-ui--insert-formatted-text "\n"))))))
+          (org-social-ui--insert-formatted-text "\n"))))
+
+    ;; Pinned post section
+    (when (and pinned-id (not (string-empty-p pinned-id)) all-posts)
+      (let ((pinned-post (cl-find-if
+                          (lambda (post)
+                            (string= (alist-get 'timestamp post) pinned-id))
+                          all-posts)))
+        (when pinned-post
+          (org-social-ui--insert-separator)
+          (org-social-ui--insert-formatted-text "\n📌 Pinned Post\n\n" 'bold "#ffaa00")
+          ;; Add author information to the post
+          (let ((post-with-author (append pinned-post
+                                          (list (cons 'author-nick nick)
+                                                (cons 'author-url user-url)
+                                                (cons 'author-avatar avatar)))))
+            (org-social-ui--post-component post-with-author nil t)))))))
 
 
 (provide 'org-social-ui-profile)
