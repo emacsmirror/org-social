@@ -339,9 +339,8 @@ When creating a new post, you'll be prompted to choose the visibility level. If 
 
 **Example mention-only post**:
 ```org
-**
+** 2025-12-29T15:30:00+0100
 :PROPERTIES:
-:ID: 2025-12-29T15:30:00+0100
 :VISIBILITY: mention
 :END:
 
@@ -391,9 +390,8 @@ Posts in org-social.el support **interactive Org mode features**, allowing table
 Create posts with Org mode tables and formulas that can be recalculated:
 
 ```org
-**
+** 2025-01-15T10:00:00+0100
 :PROPERTIES:
-:ID: 2025-01-15T10:00:00+0100
 :END:
 
 Monthly budget:
@@ -416,9 +414,8 @@ Monthly budget:
 Share code that others can execute directly in the timeline:
 
 ```org
-**
+** 2025-01-15T11:00:00+0100
 :PROPERTIES:
-:ID: 2025-01-15T11:00:00+0100
 :END:
 
 Quick Fibonacci calculator:
@@ -526,12 +523,55 @@ This includes updating:
 
 **Example migration post**:
 ```org
-**
+** 2025-11-23T12:15:04+0100
 :PROPERTIES:
-:ID: 2025-11-23T12:15:04+0100
 :CLIENT: org-social.el
 :MIGRATION: https://old-site.com/social.org https://new-site.com/social.org
 :END:
+```
+
+##### `org-social-migrate-ids-to-header`
+
+Migrate post IDs from the old properties drawer format to the new header format introduced in Org Social v1.6.
+
+**What it does:**
+- Finds all posts with ID in `:PROPERTIES:` drawer
+- Moves the ID to the header (after `**`)
+- Removes the `:ID:` line from properties completely
+- Preserves all other properties and content
+- Shows detailed statistics of migrated posts
+
+**Before migration:**
+```org
+**
+:PROPERTIES:
+:ID: 2025-01-05T10:00:00+0100
+:CLIENT: org-social.el
+:END:
+
+Post content
+```
+
+**After migration:**
+```org
+** 2025-01-05T10:00:00+0100
+:PROPERTIES:
+:CLIENT: org-social.el
+:END:
+
+Post content
+```
+
+**Important notes:**
+- Posts with ID already in header are skipped
+- The `:ID:` line is completely removed from properties (no gaps left)
+- Safe to run multiple times (idempotent)
+- Handles all post types: normal, groups, replies, polls, reactions, boosts
+- Asks for confirmation if buffer has unsaved changes
+
+**Usage:**
+```elisp
+M-x org-social-migrate-ids-to-header
 ```
 
 ##### `org-social-mention-user`

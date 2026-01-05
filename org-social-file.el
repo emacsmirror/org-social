@@ -3,7 +3,7 @@
 ;; SPDX-License-Identifier: GPL-3.0
 
 ;; Author: Andros Fenollosa <hi@andros.dev>
-;; Version: 2.9
+;; Version: 2.10
 ;; URL: https://github.com/tanrax/org-social.el
 
 ;; This file is NOT part of GNU Emacs.
@@ -250,30 +250,14 @@ nil otherwise."
     (remove-hook 'before-save-hook #'org-social-file--before-save t)
     (remove-hook 'after-save-hook #'org-social-file--auto-save t)))
 
-(defun org-social-file--normalize-empty-headers ()
-  "Add a space after empty headers (**, ***, etc.) in the current buffer.
-This ensures lines with only asterisks become properly formatted.
-For example, \\='**\\=' becomes \\='** \\=', \\='***\\=' becomes \\='*** \\='.
-This function runs with depth 90 in `before-save-hook', executing AFTER
-`delete-trailing-whitespace', ensuring the space survives.
-Does NOT save the buffer - modifications happen in memory only."
-  (save-excursion
-    (goto-char (point-min))
-    ;; Match lines with only asterisks (2 or more) at the start
-    (while (re-search-forward "^\\(\\*\\{2,\\}\\)$" nil t)
-      ;; Found a line with only asterisks
-      (end-of-line)
-      (insert " "))))
+;; Removed org-social-file--normalize-empty-headers function
+;; No longer needed since all posts now have ID in header (Org Social v1.6)
 
 (defun org-social-file--before-save ()
-  "Normalize empty headers before saving."
-  (let ((current-file (buffer-file-name))
-        (target-file (if (org-social-file--is-vfile-p org-social-file)
-                         (org-social-file--get-local-file-path org-social-file)
-                       org-social-file)))
-    (when (and current-file
-               (file-equal-p current-file target-file))
-      (org-social-file--normalize-empty-headers))))
+  "Hook run before saving Org-social files."
+  ;; Currently no pre-save processing needed
+  ;; This function is kept for future use if needed
+  nil)
 
 (defun org-social-file--auto-save ()
   "Auto-save handler for Org-social files."
@@ -335,8 +319,7 @@ If VISIBILITY is \"mention\", add VISIBILITY property to the post."
               (insert "\n")
             ;; Not on new line, add two
             (insert "\n\n")))))
-    (insert "** \n:PROPERTIES:\n")
-    (insert (format ":ID: %s\n" timestamp))
+    (insert (format "** %s\n:PROPERTIES:\n" timestamp))
     ;; Only insert LANG if it has a value (optional field)
     (when lang-value
       (insert (format ":LANG: %s\n" lang-value)))
@@ -385,8 +368,7 @@ and POLL-END is the RFC 3339 formatted end time."
               (insert "\n")
             ;; Not on new line, add two
             (insert "\n\n")))))
-    (insert "** \n:PROPERTIES:\n")
-    (insert (format ":ID: %s\n" timestamp))
+    (insert (format "** %s\n:PROPERTIES:\n" timestamp))
     ;; Only insert LANG if it has a value (optional field)
     (when lang-value
       (insert (format ":LANG: %s\n" lang-value)))
@@ -625,8 +607,7 @@ EMOJI is the reaction emoji."
               (insert "\n")
             ;; Not on new line, add two
             (insert "\n\n")))))
-    (insert "** \n:PROPERTIES:\n")
-    (insert (format ":ID: %s\n" timestamp))
+    (insert (format "** %s\n:PROPERTIES:\n" timestamp))
     (insert ":CLIENT: org-social.el\n")
     (insert (format ":REPLY_TO: %s#%s\n" reply-url reply-id))
     ;; Add GROUP property if we're in a group context
@@ -688,8 +669,7 @@ Optional COMMENT is a text comment to add to the boost."
               (insert "\n")
             ;; Not on new line, add two
             (insert "\n\n")))))
-    (insert "** \n:PROPERTIES:\n")
-    (insert (format ":ID: %s\n" timestamp))
+    (insert (format "** %s\n:PROPERTIES:\n" timestamp))
     (insert ":CLIENT: org-social.el\n")
     (insert (format ":INCLUDE: %s#%s\n" post-url post-id))
     ;; Add GROUP property if we're in a group context
@@ -1009,8 +989,7 @@ NEW-URL is the new account URL."
               (insert "\n")
             ;; Not on new line, add two
             (insert "\n\n")))))
-    (insert "** \n:PROPERTIES:\n")
-    (insert (format ":ID: %s\n" timestamp))
+    (insert (format "** %s\n:PROPERTIES:\n" timestamp))
     (insert ":CLIENT: org-social.el\n")
     (insert (format ":MIGRATION: %s %s\n" old-url new-url))
     (insert ":END:\n\n")
@@ -1080,8 +1059,7 @@ Returns the number of replacements made."
           (goto-char match-start)
           ;; Check if we're in a code block
           (let ((in-code-block (org-social-file--in-code-block-p))
-                (line-start (line-beginning-position))
-                (line-end (line-end-position)))
+                (line-start (line-beginning-position)))
             ;; Check if this line contains :MIGRATION:
             (goto-char line-start)
             (let ((is-migration-line (looking-at "^:MIGRATION:")))
@@ -1126,8 +1104,7 @@ Returns an alist with keys 'old-url, 'new-url, and 'id, or nil if no migration f
 Updates our local social.org file if a migration is found."
   (when-let ((migration (org-social-file--find-migration-in-feed feed-content)))
     (let ((old-url (alist-get 'old-url migration))
-          (new-url (alist-get 'new-url migration))
-          (id (alist-get 'id migration)))
+          (new-url (alist-get 'new-url migration)))
       ;; Only process if the old URL matches the feed URL we're downloading
       (when (and old-url new-url (string= old-url feed-url))
         (let ((target-file (if (org-social-file--is-vfile-p org-social-file)
@@ -1150,6 +1127,131 @@ FEEDS-DATA is a list of (url . content) cons cells."
             (content (cdr feed-pair)))
         (when (and url content)
           (org-social-file--process-remote-migration url content))))))
+
+;;; ID Migration from properties to header
+
+(defun org-social-file--migrate-ids-to-header ()
+  "Migrate post IDs from :PROPERTIES: drawer to header format.
+Finds all posts with ID in properties and moves them to the header
+according to Org Social v1.6 specification.  Posts with ID already
+in header are left unchanged.  Returns count of migrated posts."
+  (interactive)
+  (let ((migrated-count 0)
+        (skipped-count 0)
+        (error-count 0))
+    (save-excursion
+      (goto-char (point-min))
+      ;; Find the Posts section
+      (if (not (re-search-forward "^\\* Posts" nil t))
+          (message "No '* Posts' section found in buffer")
+        ;; Process each post
+        (while (re-search-forward "^\\*\\*\\($\\|[^*]\\)" nil t)
+          (let ((post-start (match-beginning 0))
+                id-from-header
+                id-from-properties
+                props-start
+                props-end
+                prop-section-start
+                post-end)
+            (save-excursion
+              ;; Check if ID is already in header
+              (beginning-of-line)
+              (when (looking-at "^\\*\\*\\s-+\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}T[0-9]\\{2\\}:[0-9]\\{2\\}:[0-9]\\{2\\}[+-][0-9]\\{2\\}\\(:[0-9]\\{2\\}\\|[0-9]\\{2\\}\\)\\)")
+                (setq id-from-header (match-string 1)))
+
+              ;; Find the end of this post
+              (forward-line 1)
+              (setq props-start (point))
+              (if (re-search-forward "^\\*\\*\\($\\|[^*]\\)" nil t)
+                  (progn
+                    (beginning-of-line)
+                    (setq post-end (point)))
+                (setq post-end (point-max)))
+
+              ;; Look for ID in properties
+              (goto-char props-start)
+              (when (and (< (point) post-end)
+                         (re-search-forward ":PROPERTIES:" post-end t))
+                (forward-line 1)
+                (setq prop-section-start (point))
+                (when (re-search-forward ":END:" post-end t)
+                  (setq props-end (point))
+                  ;; Extract ID from properties
+                  (goto-char prop-section-start)
+                  (when (re-search-forward "^:ID:\\s-*\\(.+\\)$" props-end t)
+                    (setq id-from-properties (string-trim (match-string 1))))))
+
+              ;; Decide what to do
+              (cond
+               ;; Already has ID in header - skip
+               (id-from-header
+                (setq skipped-count (1+ skipped-count)))
+
+               ;; Has ID only in properties - migrate it
+               (id-from-properties
+                (condition-case err
+                    (progn
+                      ;; First delete the :ID: line from properties (before modifying buffer)
+                      (when (and prop-section-start props-end)
+                        (goto-char prop-section-start)
+                        (when (re-search-forward "^:ID:\\s-*\\(.+\\)$" props-end t)
+                          (delete-region (line-beginning-position)
+                                         (progn (forward-line 1) (point)))))
+
+                      ;; Now replace the header line
+                      (goto-char post-start)
+                      (beginning-of-line)
+                      (when (looking-at "^\\*\\*\\s-*$")
+                        (delete-region (point) (line-end-position))
+                        (insert (format "** %s" id-from-properties))
+
+                        (setq migrated-count (1+ migrated-count))))
+                  (error
+                   (setq error-count (1+ error-count))
+                   (message "Error migrating post at line %d: %s"
+                            (line-number-at-pos post-start)
+                            (error-message-string err)))))
+
+               ;; No ID at all - error
+               (t
+                (setq error-count (1+ error-count))
+                (message "Post at line %d has no ID"
+                         (line-number-at-pos post-start)))))))))
+
+    ;; Report results
+    (message "ID Migration complete: %d migrated, %d skipped (already in header), %d errors"
+             migrated-count skipped-count error-count)
+    migrated-count))
+
+(defun org-social-migrate-ids-to-header ()
+  "Migrate all post IDs from properties to header format interactively.
+This function updates your social.org file to use the new Org Social v1.6
+format where post IDs appear in the header instead of the properties drawer.
+
+Before migration:
+  **
+  :PROPERTIES:
+  :ID: 2025-01-05T10:00:00+0100
+  :END:
+
+After migration:
+  ** 2025-01-05T10:00:00+0100
+  :PROPERTIES:
+  :END:
+
+The function will:
+- Only migrate posts that have ID in properties but not in header
+- Skip posts that already have ID in header
+- Show statistics of how many posts were migrated
+- Preserve all other post content and properties
+
+It is recommended to save your file before running this command."
+  (interactive)
+  (when (or (not (buffer-modified-p))
+            (y-or-n-p "Buffer has unsaved changes.  Continue migration anyway? "))
+    (let ((count (org-social-file--migrate-ids-to-header)))
+      (when (> count 0)
+        (message "Successfully migrated %d post(s).  Remember to save the buffer." count)))))
 
 ;; Interactive functions with proper naming
 (defalias 'org-social-save-file #'org-social-file--save)
