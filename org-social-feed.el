@@ -118,7 +118,9 @@ Returns an RFC 3339 formatted date string, or nil if filtering is disabled."
 (defun org-social-feed--filter-by-date (content start-date)
   "Filter CONTENT to only include posts newer than START-DATE.
 Returns filtered content with header + filtered posts.
-If START-DATE is nil, returns CONTENT unchanged."
+If START-DATE is nil, returns CONTENT unchanged.
+Supports both Org Social v1.6 format (ID in header) and legacy
+format (ID in properties)."
   (if (not start-date)
       content
     ;; Use org-social-partial-fetch for filtering logic
@@ -136,22 +138,43 @@ If START-DATE is nil, returns CONTENT unchanged."
               (let ((filtered-posts '()))
                 ;; Match only level-2 posts (** followed by non-asterisk or newline)
                 (while (re-search-forward "^\\*\\*\\($\\|[^*]\\)" nil t)
-                  (let ((post-start (line-beginning-position)))
-                    ;; Find post ID
-                    (when (re-search-forward ":ID:\\s-*\\(.+\\)$" nil t)
-                      (let ((post-id (match-string 1)))
+                  (let ((post-start (line-beginning-position))
+                        (id-from-header nil)
+                        (id-from-properties nil)
+                        (post-id nil))
+                    ;; Extract ID from header (v1.6 format: ** TIMESTAMP)
+                    (beginning-of-line)
+                    (when (looking-at "^\\*\\*\\s-+\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}T[0-9]\\{2\\}:[0-9]\\{2\\}:[0-9]\\{2\\}[+-][0-9]\\{2\\}\\(:[0-9]\\{2\\}\\|[0-9]\\{2\\}\\)\\)")
+                      (setq id-from-header (match-string 1)))
+                    (end-of-line)
+                    (forward-char)
+
+                    ;; Find post end first (needed for searching within post boundaries)
+                    (let ((post-end (save-excursion
+                                      (if (re-search-forward "^\\*\\*\\($\\|[^*]\\)" nil t)
+                                          (line-beginning-position)
+                                        (point-max)))))
+
+                      ;; Extract ID from properties (legacy format)
+                      (when (re-search-forward ":ID:\\s-*\\(.+\\)$" post-end t)
+                        (setq id-from-properties (match-string 1)))
+
+                      ;; Use ID from header if present, otherwise use ID from properties
+                      ;; This matches the parser behavior (org-social-parser.el)
+                      (setq post-id (or id-from-header id-from-properties))
+
+                      ;; Filter post by date if we have an ID
+                      (when post-id
                         ;; Compare dates (RFC 3339 strings are lexicographically comparable)
                         ;; Include posts that are not too old AND not in the future
                         (when (and (not (string< post-id start-date))
                                    (string< post-id (format-time-string "%FT%T%z")))
-                          ;; Find post end (next ** or end of buffer)
-                          ;; Use ($|[^*]) to match ** at end of line or followed by non-asterisk
-                          (let ((post-end (save-excursion
-                                            (if (re-search-forward "^\\*\\*\\($\\|[^*]\\)" nil t)
-						(line-beginning-position)
-                                              (point-max)))))
-                            (push (buffer-substring-no-properties post-start post-end)
-                                  filtered-posts)))))))
+                          (goto-char post-start)
+                          (push (buffer-substring-no-properties post-start post-end)
+                                filtered-posts)))
+
+                      ;; Move to the end of this post for next iteration
+                      (goto-char post-end))))
                 ;; Rebuild content
                 (if filtered-posts
                     (concat header "\n" (mapconcat #'identity (nreverse filtered-posts) ""))
