@@ -15,11 +15,44 @@
 (require 'org-social-ui-utils)
 (require 'org-social-ui-components)
 
+;; Helper function to check if a boost is valid
+(defun org-social-ui--is-valid-boost-p (post)
+  "Check if POST is a valid boost.
+A boost without text (simple boost) that points to another empty post
+\(another boost without text) is considered invalid and should be filtered out."
+  (let* ((include (alist-get 'include post))
+         (text (string-trim (or (alist-get 'text post)
+                                (alist-get 'content post)
+                                ""))))
+    ;; If post has no include, it's not a boost, so it's valid
+    (if (or (not include) (string-empty-p include))
+        t
+      ;; If post has include but also has text, it's a quote boost, which is valid
+      (if (not (string-empty-p text))
+          t
+        ;; Post is a simple boost (include but no text)
+        ;; Check if the boosted post is also empty
+        (let ((boosted-post (org-social-ui--fetch-post-sync include)))
+          (if (not boosted-post)
+              ;; If we can't fetch the boosted post, assume it's valid
+              t
+            ;; Check if boosted post has content
+            (let* ((boosted-text (string-trim (or (alist-get 'text boosted-post)
+                                                  (alist-get 'content boosted-post)
+                                                  "")))
+                   (boosted-include (alist-get 'include boosted-post)))
+              ;; Valid if boosted post has text OR doesn't have include
+              ;; Invalid if boosted post is also a boost without text
+              (or (not (string-empty-p boosted-text))
+                  (not boosted-include)
+                  (string-empty-p boosted-include)))))))))
+
 ;; Helper function to filter out reactions
 (defun org-social-ui--filter-reactions (timeline)
-  "Filter out reactions and poll votes from TIMELINE.
+  "Filter out reactions, poll votes, and invalid boosts from TIMELINE.
 Reactions are posts with reply_to and mood (regardless of text content).
-Poll votes are posts with poll_option property."
+Poll votes are posts with poll_option property.
+Invalid boosts are simple boosts (no text) that point to empty posts."
   (seq-filter
    (lambda (post)
      (let ((mood (alist-get 'mood post))
@@ -27,15 +60,18 @@ Poll votes are posts with poll_option property."
            (poll-option (alist-get 'poll_option post)))
        ;; Exclude reactions: posts with reply_to + mood (any text or empty)
        ;; Exclude poll votes: posts with poll_option
-       (not (or (and reply-to mood)
-                poll-option))))
+       ;; Exclude invalid boosts: simple boosts of empty posts
+       (and (not (or (and reply-to mood)
+                     poll-option))
+            (org-social-ui--is-valid-boost-p post))))
    timeline))
 
 ;; Helper function to filter out group posts (only for timeline)
 (defun org-social-ui--filter-timeline-posts (timeline)
-  "Filter out reactions, poll votes, and group posts from TIMELINE.
-This combines reaction filtering, poll vote filtering, and group filtering
-specifically for the timeline view."
+  "Filter out reactions, poll votes, group posts, and invalid boosts.
+This function filters TIMELINE to exclude reactions (posts with reply_to
+and mood), poll votes, group posts, and invalid boosts (simple boosts
+without text that point to empty posts)."
   (seq-filter
    (lambda (post)
      (let ((mood (alist-get 'mood post))
@@ -45,9 +81,11 @@ specifically for the timeline view."
        ;; Exclude reactions: posts with reply_to + mood (any text or empty)
        ;; Exclude poll votes: posts with poll_option
        ;; Exclude group posts: posts with group property
-       (not (or (and reply-to mood)
-                poll-option
-                group))))
+       ;; Exclude invalid boosts: simple boosts of empty posts
+       (and (not (or (and reply-to mood)
+                     poll-option
+                     group))
+            (org-social-ui--is-valid-boost-p post))))
    timeline))
 
 ;; Forward declarations
@@ -63,6 +101,7 @@ specifically for the timeline view."
 (declare-function org-social-ui-search "org-social-ui-search" ())
 (declare-function org-social-ui-discover "org-social-ui-discover" ())
 (declare-function org-social-ui-profile "org-social-ui-profile" (user-url))
+(declare-function org-social-ui--fetch-post-sync "org-social-ui-utils" (post-url))
 
 ;; Refresh timer variable
 (defvar org-social-ui--refresh-timer nil
