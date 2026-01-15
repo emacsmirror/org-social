@@ -425,7 +425,7 @@ According to Org Social specification v1.5:
                                           ;; Keep posts with text (reactions are filtered out)
                                           ;; Keep boosts (posts with INCLUDE property)
                                           ;; Exclude group posts (posts with GROUP property)
-                                          ;; Exclude reactions (posts with reply_to + mood)
+                                          ;; Exclude reactions (posts with reply_to + mood but NO text)
                                           ;; Filter by language if org-social-language-filter is set
                                           ;; Filter by visibility (VISIBILITY:mention)
                                           (let ((text (alist-get 'text post))
@@ -435,9 +435,13 @@ According to Org Social specification v1.5:
                                                 (include (alist-get 'include post))
                                                 (lang (alist-get 'lang post)))
                                             ;; Exclude posts with GROUP property from timeline
-                                            ;; Exclude reactions (reply_to + mood)
+                                            ;; Exclude reactions (reply_to + mood + NO text)
                                             (and (not group)
-                                                 (not (and reply-to mood))
+                                                 (not (and reply-to
+                                                           mood
+                                                           (not (string-empty-p mood))
+                                                           (or (not text)
+                                                               (string-empty-p (string-trim text)))))
                                                  ;; Must have text OR be a boost (include)
                                                  (or (and text (not (string-empty-p (string-trim text))))
                                                      (and include (not (string-empty-p include))))
