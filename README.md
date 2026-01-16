@@ -682,6 +682,18 @@ When using multi-account configuration, you can specify hooks for each account i
 | `org-social-max-concurrent-downloads` | Maximum number of concurrent feed downloads. When loading the timeline, feeds are downloaded in parallel. This setting limits simultaneous downloads to avoid overwhelming system resources or triggering rate limits on remote servers. Recommended range: 10-30. Higher values = faster but more resource intensive. | `20` | ❌ | `integer` |
 | `org-social-language-filter` | List of language codes to filter timeline posts. Only posts with `:LANG:` property matching these codes will be shown. When `nil`, all posts are shown regardless of language. Posts without a `:LANG:` property or with empty `:LANG:` are hidden when filter is active. Uses ISO 639-1 two-letter language codes. | `nil` | ❌ | `list` of `string` or `nil` |
 
+## ❔ FAQ
+
+### Why is dependence on a Relay mandatory?
+
+At the beginning of the project, the client was compatible with and without Relay, but at a certain point, the complexity increased. In many cases, the logic is completely different. That's why I decided to focus on using Relay to simplify many areas, and even so, this project is huge, with over 7,000 lines of code.
+
+This could be achieved with minimal effort by developing a local API (100% Elisp) using the same Relay endpoints, or a very powerful library. Even then, limitations would remain; some functionalities would be lost.
+
+If someone develops it, I'd be open to implementing this feature. In the meantime, it will depend on a relay.
+
+Finally, I want to say that I still find this work unnecessary because you can install a relay on your computer or server. Even so, I'll listen to any feedback.
+
 ## 📄 License
 
 GPL-3.0 - See LICENSE file for details.
