@@ -801,6 +801,7 @@ If called from a group buffer, automatically adds GROUP property."
 AUTHOR-URL is the URL of the post author.
 TIMESTAMP is the timestamp of the post being reacted to."
   (interactive)
+  (require 'emojify nil t)
   (if (fboundp 'emojify-completing-read)
       (let ((selected-emoji (emojify-completing-read "Select reaction: ")))
         (when selected-emoji
