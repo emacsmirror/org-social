@@ -179,6 +179,23 @@ without text that point to empty posts)."
                  :help-echo "Support Org Social development"
                  " ❤ Donate ")
 
+  (org-social-ui--insert-formatted-text " ")
+
+  (widget-create 'push-button
+                 :notify (lambda (&rest _)
+                           (let ((buffer (get-buffer-create "*Org Social Contributions*")))
+                             (with-current-buffer buffer
+                               (let ((inhibit-read-only t))
+                                 (erase-buffer)
+                                 (insert "Contributions are welcome! Please see the contribution guidelines for instructions on how to submit issues or pull requests:\n\n")
+                                 (insert "https://git.andros.dev/andros/contribute\n")
+                                 (goto-char (point-min))
+                                 (special-mode)))
+                             (let ((window (display-buffer-at-bottom buffer '((window-height . 6)))))
+                               (select-window window))))
+                 :help-echo "View contribution guidelines"
+                 " 🤝 Issue/PR ")
+
   (org-social-ui--insert-formatted-text "\n\n")
 
   ;; Help text

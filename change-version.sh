@@ -1,1 +1,1 @@
-sed -i 's/;; Version: 2\.8/;; Version: 2\.9/g' **/*.el *.el
+sed -i 's/;; Version: 2\.10/;; Version: 2\.11/g' **/*.el *.el
