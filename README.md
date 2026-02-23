@@ -704,4 +704,4 @@ See [CHANGELOG.md](CHANGELOG.md) for detailed release notes.
 
 ## 🤝 Contributing
 
-Feel free to fork the repository and submit pull requests to the *develop* branch.
+Contributions are welcome! Please see the [contribution guidelines](https://git.andros.dev/andros/contribute) for instructions on how to submit issues or pull requests.

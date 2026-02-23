@@ -1,5 +1,12 @@
 # 📝 Changelog
 
+## 2.11
+
+- **Bug Fixes**:
+  - Fixed thread (t) and profile (P) keyboard shortcuts in timeline - buttons now correctly match the emoji-only labels
+- **UI Improvements**:
+  - Added "🤝 Issue/PR" contribution button in timeline header with guidelines link
+
 ## 2.10
 
 - **Org Social v1.6 Specification Support**:

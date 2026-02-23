@@ -1,0 +1,164 @@
+Nick: adsan
+Feed: https://adsan.dev/social.org
+Website: https://adsan.dev
+Contact: Contact: https://matrix.to/#/@adsan:adsan.dev
+
+Nick: eludom
+Feed: https://codeberg.org/eludom/org-social/raw/branch/main/social.org
+Website: https://codeberg.org
+Contact: Contact: mailto: gmj@port111.com
+
+Nick: emillo
+Feed: https://emillo.net/social.org
+Website: https://emillo.net
+Contact: No contact info
+
+Nick: Eoin
+Feed: https://eoin.site/social.org
+Website: https://eoin.site
+Contact: No contact info
+
+Nick: eph.zero
+Feed: https://snoozetown.org/social.org
+Website: https://snoozetown.org
+Contact: Contact: https://masto.snoozetown.org/@ephzero
+
+Nick: FrasSmith
+Feed: https://glenelg.io/social.org
+Website: https://glenelg.io
+Contact: No contact info
+
+Nick: jbaty
+Feed: https://jackbaty.com/social.org
+Website: https://jackbaty.com
+Contact: Contact: mailto:jack@baty.net
+
+Nick: khinsen
+Feed: https://khinsen.net/social.org
+Website: https://khinsen.net
+Contact: Contact: https://scholar.social/@khinsen
+
+Nick: Leandro
+Feed: https://cybervalley.org/org-social-leandro/org-social.org
+Website: https://cybervalley.org
+Contact: Contact: xmpp:leandro@cybervalley.org
+
+Nick: luniki
+Feed: https://luniki.de/social.org
+Website: https://luniki.de
+Contact: Contact: mailto:opensocial@luniki.de
+
+Nick: muse-amuse.in
+Feed: https://muse-amuse.in/~punchagan/social.org
+Website: https://muse-amuse.in
+Contact: No contact info
+
+Nick: N.
+Feed: https://neurolog.dev/social.org
+Website: https://neurolog.dev
+Contact: Contact: https://github.com/natharari
+
+Nick: Nebucatnetzer
+Feed: https://zweili.ch/org-social/social.org
+Website: https://zweili.ch
+Contact: Contact: https://social.linux.pizza/@nebucatnetzer
+
+Nick: nickanderson
+Feed: https://cmdln.org/social.org
+Website: https://cmdln.org
+Contact: Contact: https://linkedin.com/in/hithisisnick
+
+Nick: Notxor
+Feed: https://notxor.nueva-actitud.org/social.org
+Website: https://notxor.nueva-actitud.org
+Contact: Contact: https://tuiter.rocks/deck/@Notxor
+
+Nick: okflo
+Feed: https://teletyp.ist/social.org
+Website: https://teletyp.ist
+Contact: No contact info
+
+Nick: omidmash
+Feed: https://omidmash.de/social.org
+Website: https://omidmash.de
+Contact: Contact: mailto:kontakt@omidmash.de
+
+Nick: Plakspin
+Feed: https://plakspin.nl/social.org
+Website: https://plakspin.nl
+Contact: No contact info
+
+Nick: Qrvhh
+Feed: https://raw.githubusercontent.com/fengbainuo/org-social/refs/heads/main/social.org
+Website: https://raw.githubusercontent.com
+Contact: No contact info
+
+Nick: RaZZlom
+Feed: https://gemini.quietplace.xyz/~razzlom/social.org
+Website: https://gemini.quietplace.xyz
+Contact: Contact: https://quietplace.xyz/@razzlom
+
+Nick: rossabaker
+Feed: https://rossabaker.com/social.org
+Website: https://rossabaker.com
+Contact: Contact: http://rossabaker.com/connect/
+
+Nick: Shad
+Feed: https://wsgregory.us/docs/social.org
+Website: https://wsgregory.us
+Contact: No contact info
+
+Nick: shom
+Feed: https://shom.dev/social.org
+Website: https://shom.dev
+Contact: No contact info
+
+Nick: skrlet13
+Feed: https://www.skrlet13.xyz/social.org
+Website: https://www.skrlet13.xyz
+Contact: No contact info
+
+Nick: SolarPrincess
+Feed: https://thesolarprincess.site/social.org
+Website: https://thesolarprincess.site
+Contact: Contact: https://t.me/TSolarPrincess
+
+Nick: SpaceCadet
+Feed: https://plaindrops.de/social.org
+Website: https://plaindrops.de
+Contact: No contact info
+
+Nick: sympodius
+Feed: https://www.haiverin.scot/social.org
+Website: https://www.haiverin.scot
+Contact: Contact: enquiries@haiverin.scot
+
+Nick: teoten
+Feed: https://www.teoten.com/social.org
+Website: https://www.teoten.com
+Contact: No contact info
+
+Nick: thek3nger
+Feed: https://davideaversa.it/social.org
+Website: https://davideaversa.it
+Contact: No contact info
+
+Nick: tux0r
+Feed: https://rosaelefanten.org/social.org
+Website: https://rosaelefanten.org
+Contact: Contact: https://keyoxide.org/941D456ED3A38A3B1DBEAB2BC8A2CCD4F1AE5C21
+
+Nick: will
+Feed: https://wrbutros.codeberg.page/org-social.org
+Website: https://wrbutros.codeberg.page
+Contact: No contact info
+
+Nick: xlymian
+Feed: https://xlymian.github.io/org-social/social.org
+Website: https://xlymian.github.io
+Contact: No contact info
+
+Nick: Xulfer
+Feed: https://xulfer.srht.site/social.org
+Website: https://xulfer.srht.site
+Contact: No contact info
