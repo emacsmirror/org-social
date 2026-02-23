@@ -870,7 +870,7 @@ Returns t if button was found and pressed, nil otherwise."
 (defun org-social-ui--view-thread ()
   "View thread for current post by pressing the Thread button."
   (interactive)
-  (unless (org-social-ui--find-and-press-button "🧵 Thread")
+  (unless (org-social-ui--find-and-press-button "🧵")
     (message "No thread button found near point")))
 
 (defun org-social-ui--view-notifications ()
@@ -881,7 +881,7 @@ Returns t if button was found and pressed, nil otherwise."
 (defun org-social-ui--view-profile ()
   "View profile for current post by pressing the Profile button."
   (interactive)
-  (unless (org-social-ui--find-and-press-button "👤 Profile")
+  (unless (org-social-ui--find-and-press-button "👤")
     (message "No profile button found near point")))
 
 (defun org-social-ui--view-groups ()
