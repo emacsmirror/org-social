@@ -64,7 +64,7 @@ if command -v docker >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
     fi
 
     echo "  Running melpazoid checks with MELPA recipe..."
-    RECIPE='(org-social :fetcher github :repo "tanrax/org-social.el" :files (:defaults "ui/*.el" "ui/buffers/*.el"))'
+    RECIPE='(org-social :fetcher git :url "https://git.andros.dev/org-social/org-social.el.git" :files (:defaults "ui/*.el" "ui/buffers/*.el"))'
     # Use LOCAL_REPO to test local files instead of cloning
     if RECIPE="$RECIPE" LOCAL_REPO="$(pwd)" make -C melpazoid 2>&1; then
         echo "✓ Melpazoid completed"

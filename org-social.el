@@ -1,7 +1,7 @@
 ;;; org-social.el --- An Org-social client -*- lexical-binding: t -*- -*- coding: utf-8 -*-
 ;; Author: Andros Fenollosa <hi@andros.dev>
 ;; Version: 2.14
-;; URL: https://github.com/tanrax/org-social.el
+;; URL: https://git.andros.dev/org-social/org-social.el
 ;; Package-Requires: ((emacs "30.1") (org "9.0") (request "0.3.0") (seq "2.20") (emojify "1.2") (async-http-queue "0.1"))
 ;; SPDX-License-Identifier: GPL-3.0
 ;; This file is NOT part of GNU Emacs.

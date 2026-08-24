@@ -7,7 +7,7 @@
 		  (seq "2.20")
 		  (emojify "1.2")
 		  (async-http-queue "0.1"))
-		:url "https://github.com/tanrax/org-social.el"
+		:url "https://git.andros.dev/org-social/org-social.el"
 		:keywords '("comm" "org" "social")
 		:lisp-dir "."
 		:authors '(("Andros Fenollosa" . "hi@andros.dev"))

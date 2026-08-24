@@ -1,6 +1,6 @@
 # org-social.el
 
-An Emacs client for [Org Social](https://github.com/tanrax/org-social), a decentralized social network that works with Org Mode files over HTTP.
+An Emacs client for [Org Social](https://org-social.org/), a decentralized social network that works with Org Mode files over HTTP.
 
 ![Screenshot timeline](screenshots/screenshot-1.png)
 ![Screenshot profile](screenshots/screenshot-2.png)
@@ -105,7 +105,7 @@ Install the development version from the `develop` branch:
 ```elisp
 (use-package request)
 (use-package org-social
-  :vc (:url "https://github.com/tanrax/org-social.el"
+  :vc (:url "https://git.andros.dev/org-social/org-social.el"
        :rev "develop"))
 ```
 
@@ -116,7 +116,7 @@ To use the old version 1, use the `v1` branch:
 ```elisp
 (use-package request)
 (use-package org-social
-  :vc (:url "https://github.com/tanrax/org-social.el"
+  :vc (:url "https://git.andros.dev/org-social/org-social.el"
        :rev "v1"))
 ```
 
