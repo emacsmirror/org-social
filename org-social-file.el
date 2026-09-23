@@ -512,7 +512,13 @@ For local files, opens the file if not already visiting."
       (unless (and (buffer-file-name)
                    (string= (expand-file-name (buffer-file-name))
                             (expand-file-name target-file)))
-        (org-social-file--open)))))
+        (org-social-file--open)))
+    ;; Ensure the social file buffer is current and displayed, so subsequent
+    ;; write operations (e.g. inserting a new post) do not run in the
+    ;; read-only buffer that triggered this call (e.g. the timeline).
+    (let ((buf (find-buffer-visiting target-file)))
+      (when (and buf (not (eq buf (current-buffer))))
+        (switch-to-buffer buf)))))
 
 (defun org-social-file--new-post (&optional reply-url reply-id group-context extra-properties)
   "Create a new post in your Org-social feed.
