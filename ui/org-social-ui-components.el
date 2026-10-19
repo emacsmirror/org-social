@@ -2,7 +2,7 @@
 
 ;; SPDX-License-Identifier: GPL-3.0
 ;; Author: Andros Fenollosa <hi@andros.dev>
-;; Version: 2.14
+;; Version: 2.15
 ;; URL: https://git.andros.dev/org-social/org-social.el
 
 ;;; Commentary:
@@ -42,6 +42,25 @@
   "Cache for replies check results to avoid redundant relay queries.")
 
 ;; Helper function
+(defun org-social-ui--simple-boost-target (post)
+  "Return the boosted post URL when POST is a simple boost, else nil.
+A simple boost has an INCLUDE property and an empty body.  The Org
+Social spec defines it as sharing someone else's post, so replies,
+reactions and boosts made from it belong to the boosted post.  A quote
+boost (with a comment) is the booster's own post and returns nil."
+  (let ((include (alist-get 'include post))
+        (text (or (alist-get 'text post) (alist-get 'content post) "")))
+    (when (and (stringp include)
+               (not (string-empty-p include))
+               (string-empty-p (string-trim text)))
+      include)))
+
+(defun org-social-ui--split-post-url (post-url)
+  "Split POST-URL (URL#ID) into a cons cell (FEED-URL . ID)."
+  (let ((separator (string-match "#[^#]*\\'" post-url)))
+    (cons (substring post-url 0 separator)
+          (substring post-url (1+ separator)))))
+
 (defun org-social-ui--post-has-real-replies-p (post-url)
   "Check if POST-URL has real replies (excluding simple votes).
 A simple vote is a reply with POLL_OPTION but no text content.
@@ -247,11 +266,18 @@ When NO-TRUNCATE is non-nil, the post is displayed in full without truncation."
                              (alist-get 'date post)))
          (post-url-temp (when (and author-url-temp timestamp-temp)
                           (format "%s#%s" author-url-temp timestamp-temp)))
-         (post-with-reactions (if (and post-url-temp
-                                       (not (alist-get 'reactions post))
-                                       (fboundp 'org-social-ui--fetch-post-reactions-sync))
-                                  (org-social-ui--fetch-post-reactions-sync post-url-temp post)
-                                post)))
+         ;; A simple boost shows the reactions and boosts of the boosted post
+         (boost-target-temp (org-social-ui--simple-boost-target post))
+         (post-with-reactions
+          (cond
+           ((not (fboundp 'org-social-ui--fetch-post-reactions-sync)) post)
+           (boost-target-temp
+            (org-social-ui--fetch-post-reactions-sync
+             boost-target-temp
+             (assq-delete-all 'reactions (assq-delete-all 'boosts (copy-alist post)))))
+           ((and post-url-temp (not (alist-get 'reactions post)))
+            (org-social-ui--fetch-post-reactions-sync post-url-temp post))
+           (t post))))
 
     ;; Now render the post (with reactions if available)
     (let* ((author (or (alist-get 'author-nick post-with-reactions)
@@ -284,7 +310,17 @@ When NO-TRUNCATE is non-nil, the post is displayed in full without truncation."
                            0))
            (my-nick (alist-get 'nick org-social-variables--my-profile))
            (is-my-post (or (string= author my-nick)
-                           (string= author-url (alist-get 'url org-social-variables--my-profile)))))
+                           (string= author-url (alist-get 'url org-social-variables--my-profile))))
+           ;; Reply, react, boost, profile, thread and share act on the
+           ;; boosted post for a simple boost; Edit keeps acting on the boost.
+           (boost-target (org-social-ui--simple-boost-target post-with-reactions))
+           (target (when boost-target (org-social-ui--split-post-url boost-target)))
+           (target-author-url (if target (car target) author-url))
+           (target-timestamp (if target (cdr target) timestamp))
+           (is-my-target (if target
+                             (string= target-author-url
+                                      (alist-get 'url org-social-variables--my-profile))
+                           is-my-post)))
 
       ;; 1. Add line break after separator before content
       (org-social-ui--insert-formatted-text "\n")
@@ -295,6 +331,7 @@ When NO-TRUNCATE is non-nil, the post is displayed in full without truncation."
                                    (alist-get 'url org-social-variables--my-profile)
                                    timestamp)
 			 (format "%s#%s" author-url timestamp)))
+             (target-url (or boost-target post-url))
              (post-data-with-url (append post `((url . ,post-url)))))
 
 	;; Create invisible widget to store post data
@@ -448,11 +485,11 @@ When NO-TRUNCATE is non-nil, the post is displayed in full without truncation."
             (setq first-button nil))
 
           ;; Reply button (only for others' posts)
-          (when (not is-my-post)
+          (when (not is-my-target)
             (unless first-button (org-social-ui--insert-formatted-text " "))
             (widget-create 'push-button
                            :notify `(lambda (&rest _)
-				      (org-social-file--new-post ,author-url ,timestamp))
+				      (org-social-file--new-post ,target-author-url ,target-timestamp))
                            :help-echo "Reply to this post"
                            " ↳ ")
             (setq first-button nil))
@@ -460,9 +497,9 @@ When NO-TRUNCATE is non-nil, the post is displayed in full without truncation."
           ;; Thread button - show if post has reply_to OR has real replies
           (let* ((reply-to (alist-get 'reply_to post))
 		 (has-reply-to (and reply-to (not (string-empty-p reply-to))))
-		 (has-real-replies (org-social-ui--post-has-real-replies-p post-url))
-		 (thread-url (if has-reply-to reply-to post-url)))
-            (when (or has-reply-to has-real-replies)
+		 (has-real-replies (org-social-ui--post-has-real-replies-p target-url))
+		 (thread-url (if has-reply-to reply-to target-url)))
+            (when (or has-reply-to boost-target has-real-replies)
 	      (unless first-button (org-social-ui--insert-formatted-text " "))
 	      (widget-create 'push-button
                              :notify `(lambda (&rest _)
@@ -472,34 +509,34 @@ When NO-TRUNCATE is non-nil, the post is displayed in full without truncation."
 	      (setq first-button nil)))
 
           ;; Profile button (only for others' posts)
-          (when (not is-my-post)
+          (when (not is-my-target)
             (unless first-button (org-social-ui--insert-formatted-text " "))
             (widget-create 'push-button
                            :notify `(lambda (&rest _)
-				      (org-social-ui-profile ,author-url))
+				      (org-social-ui-profile ,target-author-url))
                            :help-echo "View user profile"
                            " 👤 ")
             (setq first-button nil))
 
           ;; Reaction button (only for others' posts)
-          (when (not is-my-post)
+          (when (not is-my-target)
             (unless first-button (org-social-ui--insert-formatted-text " "))
             (widget-create 'push-button
                            :notify `(lambda (&rest _)
-				      (org-social-ui--add-reaction ,author-url ,timestamp))
+				      (org-social-ui--add-reaction ,target-author-url ,target-timestamp))
                            :help-echo "Add reaction to this post"
                            " 😊 ")
             (setq first-button nil))
 
           ;; Boost button (only for others' posts)
-          (when (not is-my-post)
+          (when (not is-my-target)
             (unless first-button (org-social-ui--insert-formatted-text " "))
             (let ((boost-label (if (> boosts-count 0)
                                    (format " %d 🔄 " boosts-count)
                                  " 🔄 ")))
 	      (widget-create 'push-button
                              :notify `(lambda (&rest _)
-                                        (org-social-ui--boost-post ,author-url ,timestamp))
+                                        (org-social-ui--boost-post ,target-author-url ,target-timestamp))
                              :help-echo "Boost (share) this post"
                              boost-label))
             (setq first-button nil))
@@ -511,7 +548,7 @@ When NO-TRUNCATE is non-nil, the post is displayed in full without truncation."
             (unless first-button (org-social-ui--insert-formatted-text " "))
             (widget-create 'push-button
                            :notify `(lambda (&rest _)
-				      (org-social-ui--open-live-preview ,author-url ,timestamp))
+				      (org-social-ui--open-live-preview ,target-author-url ,target-timestamp))
                            :help-echo "Share post preview link"
                            " 🔗 ")
             (setq first-button nil))
