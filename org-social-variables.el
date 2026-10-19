@@ -3,7 +3,7 @@
 ;; SPDX-License-Identifier: GPL-3.0
 
 ;; Author: Andros Fenollosa <hi@andros.dev>
-;; Version: 2.14
+;; Version: 2.15
 ;; URL: https://git.andros.dev/org-social/org-social.el
 
 ;; This file is NOT part of GNU Emacs.

@@ -1,5 +1,10 @@
 # 📝 Changelog
 
+## 2.15
+
+- **Bug Fixes**:
+  - Actions on a simple boost (`:INCLUDE:` with no text) now target the boosted post, as the Org Social specification defines it as sharing someone else's post. Reply, react, boost, thread, profile and share buttons (and their `r`, `R`, `b`, `t`, `P` shortcuts) used to act on the boost itself, so a reaction meant for the original notified the booster instead. Reactions and boost counts shown on the boost are now those of the boosted post. Edit still acts on your own boost, and quote boosts (with text) are unchanged.
+
 ## 2.14
 
 - **Bot post support** (Org Social specification - `:BOT:` property):
