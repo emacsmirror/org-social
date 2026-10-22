@@ -3,7 +3,7 @@
 ;; SPDX-License-Identifier: GPL-3.0
 
 ;; Author: Andros Fenollosa <hi@andros.dev>
-;; Version: 2.15
+;; Version: 2.16
 ;; URL: https://git.andros.dev/org-social/org-social.el
 
 ;; This file is NOT part of GNU Emacs.
@@ -51,20 +51,105 @@
 
 ;;; vfile support
 
+;; Forward declaration: the minor mode is defined below.
+(defvar org-social-mode)
+
+(defvar org-social-file--upload-state (make-hash-table :test #'equal)
+  "Upload state of each vfile local copy, keyed by its expanded path.
+Each value is a plist with :status (nil, `uploading', `failed' or
+`conflict'), :started (`float-time' when the running upload began),
+:pending (vfile URL of an upload requested while another one was
+running) and :conflict-file (the last conflict copy).")
+
+(defvar org-social-file--inhibit-sync nil
+  "When non-nil, saving the vfile local copy does not upload it.")
+
+(defconst org-social-file--upload-timeout 60
+  "Seconds after which a running upload is considered lost.")
+
+(defconst org-social-file--no-cache-headers
+  '(("Cache-Control" . "no-cache")
+    ("Pragma" . "no-cache"))
+  "HTTP headers asking caches between Emacs and the host to revalidate.")
+
 (defun org-social-file--is-vfile-p (file-path)
   "Check if FILE-PATH is a vfile URL (http:// or https://)."
   (and (stringp file-path)
        (or (string-prefix-p "http://" file-path)
            (string-prefix-p "https://" file-path))))
 
+(defun org-social-file--schemeless-url-p (file-path)
+  "Return non-nil if FILE-PATH looks like a URL that lost its scheme.
+For example \"host.org-social.org/vfile?token=...\"."
+  (and (stringp file-path)
+       (not (org-social-file--is-vfile-p file-path))
+       (not (string-match-p "\\`[~/.]" file-path))
+       (or (string-match-p "/vfile\\?" file-path)
+           (string-match-p
+            (concat "\\`[[:alnum:]-]+\\(?:\\.[[:alnum:]-]+\\)*"
+                    "\\.[[:alpha:]]\\{2,\\}\\(?::[0-9]+\\)?/")
+            file-path))))
+
+(defun org-social-file--vfile-url-problem (vfile-url)
+  "Return a string describing what is wrong with VFILE-URL, or nil if valid.
+A vfile URL looks like https://HOST/vfile?token=TOKEN&ts=SECONDS&sig=SIG,
+where TOKEN and SIG are 64 hexadecimal characters."
+  (let* ((parsed (url-generic-parse-url vfile-url))
+         (path-and-query (url-path-and-query parsed))
+         (params (and (cdr path-and-query)
+                      (url-parse-query-string (cdr path-and-query))))
+         (param (lambda (name) (cadr (assoc name params)))))
+    (cond
+     ((not (member (url-type parsed) '("http" "https")))
+      "it must start with https://")
+     ((or (null (url-host parsed)) (string-empty-p (url-host parsed)))
+      "it has no host")
+     ((not (equal (car path-and-query) "/vfile"))
+      "its path must be /vfile")
+     ((not (and (funcall param "token")
+                (string-match-p "\\`[[:xdigit:]]\\{64\\}\\'"
+                                (funcall param "token"))))
+      "the token parameter is missing or truncated")
+     ((not (and (funcall param "ts")
+                (string-match-p "\\`[0-9]+\\'" (funcall param "ts"))))
+      "the ts parameter is missing or truncated")
+     ((not (and (funcall param "sig")
+                (string-match-p "\\`[[:xdigit:]]\\{64\\}\\'"
+                                (funcall param "sig"))))
+      "the sig parameter is missing or truncated"))))
+
+(defun org-social-file--check-config ()
+  "Signal a `user-error' if `org-social-file' cannot be used.
+Catches URLs pasted without their scheme, which would otherwise be
+treated as a local file and never uploaded, and incomplete vfile URLs."
+  (when (org-social-file--schemeless-url-p org-social-file)
+    (user-error "Variable `org-social-file' looks like a URL without \"https://\": %s.  Add \"https://\" at the beginning"
+                org-social-file))
+  (when (org-social-file--is-vfile-p org-social-file)
+    (let ((problem (org-social-file--vfile-url-problem org-social-file)))
+      (when problem
+        (user-error "The vfile URL is invalid or incomplete (%s), copy it again from your other client"
+                    problem)))
+    (unless (and (boundp 'org-social-my-public-url)
+                 (stringp org-social-my-public-url)
+                 (not (string-empty-p org-social-my-public-url)))
+      (user-error "Variable `org-social-my-public-url' must be set to use a vfile"))))
+
 (defun org-social-file--extract-host-from-vfile (vfile-url)
   "Extract the host base URL from VFILE-URL.
-Returns the scheme://host part of the URL."
+Returns the scheme://host[:port] part of the URL."
   (when (org-social-file--is-vfile-p vfile-url)
     (let ((parsed-url (url-generic-parse-url vfile-url)))
-      (format "%s://%s"
-              (url-type parsed-url)
-              (url-host parsed-url)))))
+      (if (and (url-portspec parsed-url)
+               (/= (url-port parsed-url)
+                   (if (equal (url-type parsed-url) "https") 443 80)))
+          (format "%s://%s:%d"
+                  (url-type parsed-url)
+                  (url-host parsed-url)
+                  (url-port parsed-url))
+        (format "%s://%s"
+                (url-type parsed-url)
+                (url-host parsed-url))))))
 
 (defun org-social-file--get-local-file-path (_vfile-url)
   "Get the local file path for a vfile.
@@ -79,139 +164,523 @@ _VFILE-URL is ignored but kept for API compatibility."
       ;; Single-account mode: use default file
       (expand-file-name "v-social.org" user-emacs-directory))))
 
-(defun org-social-file--download-vfile (public-url callback)
-  "Download the file from PUBLIC-URL asynchronously.
-Calls CALLBACK with the downloaded content on success, or nil on error.
-Note: Despite the function name, this downloads from the public URL, not vfile."
-  (message "Downloading file from %s..." public-url)
-  (url-retrieve
-   public-url
-   (lambda (status)
-     (let ((content nil))
-       (condition-case err
-           (progn
-             ;; Check for errors
-             (when (plist-get status :error)
-               (error "Download failed: %S" (plist-get status :error)))
+;;;; Local copy and the remote version it is based on
 
-             ;; Extract content from buffer
-             (goto-char (point-min))
-             (when (re-search-forward "\r\n\r\n\\|\n\n" nil t)
-               (setq content (decode-coding-string
-                              (buffer-substring-no-properties (point) (point-max))
-                              'utf-8))))
-         (error
-          (message "Error downloading vfile: %s" (error-message-string err))
-          (setq content nil)))
+(defun org-social-file--sha256 (content)
+  "Return the SHA-256 hex digest of the string CONTENT encoded as UTF-8."
+  (secure-hash 'sha256 (encode-coding-string content 'utf-8-unix)))
 
-       ;; Kill buffer to avoid accumulation
-       (kill-buffer (current-buffer))
+(defun org-social-file--read-local (path)
+  "Return the contents of PATH decoded as UTF-8, or nil if it does not exist."
+  (when (file-exists-p path)
+    (with-temp-buffer
+      (let ((coding-system-for-read 'utf-8-unix))
+        (insert-file-contents path))
+      (buffer-substring-no-properties (point-min) (point-max)))))
 
-       ;; Call callback with result
-       (funcall callback content)))
-   nil t))
+(defun org-social-file--write-local (path content)
+  "Write the string CONTENT to PATH as UTF-8 with LF line endings."
+  (with-temp-file path
+    (insert content)
+    (set-buffer-file-coding-system 'utf-8-unix)))
 
-(defun org-social-file--download-vfile-sync (public-url)
-  "Download the file from PUBLIC-URL synchronously.
-Returns the downloaded content as a string, or nil on error.
-Note: Despite the function name, this downloads from the public URL, not vfile."
+(defun org-social-file--base-file (local-path)
+  "Return the file that remembers the remote version of LOCAL-PATH."
+  (concat local-path ".etag"))
+
+(defun org-social-file--read-base (local-path)
+  "Return the remote version LOCAL-PATH was last synchronized with.
+The value is a plist (:etag ETAG :sha256 HASH), where ETAG may be nil
+when the host sent none, or nil when the version is unknown."
+  (let ((file (org-social-file--base-file local-path)))
+    (when (file-readable-p file)
+      (condition-case nil
+          (with-temp-buffer
+            (insert-file-contents file)
+            (let ((base (read (current-buffer))))
+              (when (and (listp base) (stringp (plist-get base :sha256)))
+                base)))
+        (error nil)))))
+
+(defun org-social-file--write-base (local-path etag content)
+  "Remember that LOCAL-PATH matches the remote CONTENT served with ETAG.
+The ETag and a SHA-256 of CONTENT are stored next to LOCAL-PATH so they
+survive Emacs restarts."
+  (with-temp-file (org-social-file--base-file local-path)
+    (prin1 (list :etag etag :sha256 (org-social-file--sha256 content))
+           (current-buffer))
+    (insert "\n")))
+
+;;;; HTTP
+
+(defun org-social-file--no-cache-url (url)
+  "Return URL with a `_t' query parameter that defeats stale caches."
+  (format "%s%s_t=%d" url (if (string-search "?" url) "&" "?")
+          (truncate (* 1000 (float-time)))))
+
+(defun org-social-file--parse-response ()
+  "Parse the HTTP response in the current buffer.
+Return a plist (:status CODE :etag ETAG :body BODY), where BODY is
+decoded as UTF-8.  CODE is nil if there is no HTTP status line."
+  (save-excursion
+    (goto-char (point-min))
+    (let* ((header-end (and (re-search-forward "\r?\n\r?\n" nil t) (point)))
+           (status nil)
+           (etag nil)
+           (case-fold-search t))
+      (goto-char (point-min))
+      (when (re-search-forward "^HTTP/[0-9.]+ \\([0-9]+\\)" header-end t)
+        (setq status (string-to-number (match-string 1))))
+      (goto-char (point-min))
+      (when (re-search-forward "^etag:[ \t]*\\([^\r\n]*?\\)[ \t]*\r?$" header-end t)
+        (setq etag (match-string-no-properties 1)))
+      (list :status status
+            :etag (and etag (not (string-empty-p etag)) etag)
+            :body (if header-end
+                      (decode-coding-string
+                       (buffer-substring-no-properties header-end (point-max))
+                       'utf-8)
+                    "")))))
+
+(defun org-social-file--response-ok-p (response)
+  "Return non-nil if RESPONSE has a 2xx HTTP status."
+  (let ((status (plist-get response :status)))
+    (and status (>= status 200) (< status 300))))
+
+(defun org-social-file--fetch-remote (url callback)
+  "Fetch URL asynchronously, bypassing caches.
+Call CALLBACK with the plist of `org-social-file--parse-response', or
+with nil if the host could not be reached."
+  (let ((url-request-method "GET")
+        (url-request-data nil)
+        (url-request-extra-headers org-social-file--no-cache-headers))
+    (url-retrieve
+     (org-social-file--no-cache-url url)
+     (lambda (_status)
+       (let ((response (condition-case nil
+                           (org-social-file--parse-response)
+                         (error nil))))
+         (kill-buffer (current-buffer))
+         (funcall callback (and (plist-get response :status) response))))
+     nil t)))
+
+(defun org-social-file--fetch-remote-sync (url)
+  "Fetch URL synchronously, bypassing caches.
+Return the plist of `org-social-file--parse-response', or nil if the
+host could not be reached."
   (condition-case err
-      (with-current-buffer (url-retrieve-synchronously public-url t nil 10)
-        (let ((content nil))
-          ;; Check for HTTP errors
-          (goto-char (point-min))
-          (when (re-search-forward "^HTTP/[0-9.]+ \\([0-9]+\\)" nil t)
-            (let ((status-code (string-to-number (match-string 1))))
-              (unless (and (>= status-code 200) (< status-code 300))
-                (error "HTTP error %d" status-code))))
-
-          ;; Extract content
-          (goto-char (point-min))
-          (when (re-search-forward "\r\n\r\n\\|\n\n" nil t)
-            (setq content (decode-coding-string
-                           (buffer-substring-no-properties (point) (point-max))
-                           'utf-8)))
-
-          ;; Kill buffer
-          (kill-buffer (current-buffer))
-          content))
+      (let* ((url-request-method "GET")
+             (url-request-data nil)
+             (url-request-extra-headers org-social-file--no-cache-headers)
+             (buffer (url-retrieve-synchronously
+                      (org-social-file--no-cache-url url) t nil 10)))
+        (when buffer
+          (unwind-protect
+              (with-current-buffer buffer
+                (let ((response (org-social-file--parse-response)))
+                  (and (plist-get response :status) response)))
+            (kill-buffer buffer))))
     (error
-     (message "Error downloading vfile synchronously: %s" (error-message-string err))
+     (message "Error downloading %s: %s" url (error-message-string err))
      nil)))
 
-(defun org-social-file--upload-vfile (vfile-url local-file-path)
-  "Upload LOCAL-FILE-PATH to VFILE-URL using the host's upload endpoint.
-Uses native Emacs `url-retrieve' for HTTP POST with multipart/form-data."
+(defun org-social-file--download-vfile (public-url callback)
+  "Download the file from PUBLIC-URL asynchronously, bypassing caches.
+Calls CALLBACK with the content and its ETag on success, or with nil
+and nil on error.
+Note: Despite the function name, this downloads from the public URL, not vfile."
+  (message "Downloading file from %s..." public-url)
+  (org-social-file--fetch-remote
+   public-url
+   (lambda (response)
+     (if (org-social-file--response-ok-p response)
+         (funcall callback (plist-get response :body) (plist-get response :etag))
+       (message "Error downloading vfile (status %s)"
+                (or (plist-get response :status) "unknown"))
+       (funcall callback nil nil)))))
+
+(defun org-social-file--download-vfile-sync (public-url)
+  "Download the file from PUBLIC-URL synchronously, bypassing caches.
+Returns the downloaded content as a string, or nil on error.
+Note: Despite the function name, this downloads from the public URL, not vfile."
+  (let ((response (org-social-file--fetch-remote-sync public-url)))
+    (if (org-social-file--response-ok-p response)
+        (plist-get response :body)
+      (message "Error downloading vfile synchronously (status %s)"
+               (or (plist-get response :status) "unknown"))
+      nil)))
+
+;;;; Keeping the local copy in sync with the host
+
+(defun org-social-file--revert-visiting-buffer (local-path &optional force)
+  "Reload the buffer visiting LOCAL-PATH if the file changed on disk.
+With FORCE, reload it even if the modification time looks unchanged.
+Buffers with unsaved changes are never reloaded."
+  (let ((buf (find-buffer-visiting local-path)))
+    (when (and buf
+               (not (buffer-modified-p buf))
+               (or force (not (verify-visited-file-modtime buf))))
+      (with-current-buffer buf
+        (revert-buffer t t t)))))
+
+(defun org-social-file--resolve-unsaved-changes (local-path)
+  "Make sure reloading LOCAL-PATH from the host cannot lose unsaved edits.
+If a buffer visits LOCAL-PATH with unsaved changes, ask whether to save
+them first (they are then uploaded as usual), discard them, or abort
+with a `user-error'."
+  (let ((buf (find-buffer-visiting local-path)))
+    (when (and buf (buffer-modified-p buf))
+      (pcase (car (read-multiple-choice
+                   (format "%s has unsaved changes" (buffer-name buf))
+                   '((?s "save" "Save and upload them, then reload from the host")
+                     (?d "discard" "Discard them and reload from the host")
+                     (?a "abort" "Do nothing"))))
+        (?s (with-current-buffer buf
+              (org-social-file--save-and-sync)))
+        (?d (with-current-buffer buf
+              (revert-buffer t t t)))
+        (_ (user-error "Aborted: %s has unsaved changes" (buffer-name buf)))))))
+
+(defun org-social-file--apply-remote (local-path remote-content remote-etag)
+  "Bring LOCAL-PATH up to date with REMOTE-CONTENT served with REMOTE-ETAG.
+Local changes that were saved but never uploaded are not overwritten.
+Return `updated' when LOCAL-PATH now holds the remote version,
+`local-ahead' when LOCAL-PATH has unuploaded changes on top of the
+remote version (they are uploaded now), or `conflict' when both
+changed (see `org-social-file--handle-conflict')."
+  (let* ((local (org-social-file--read-local local-path))
+         (local-sha (and local (org-social-file--sha256 local)))
+         (base-sha (plist-get (org-social-file--read-base local-path) :sha256))
+         (remote-sha (org-social-file--sha256 remote-content))
+         (buf (find-buffer-visiting local-path)))
+    (cond
+     ;; Edited while the download was running: keep both versions.
+     ((and buf (buffer-modified-p buf) local
+           (not (equal local-sha remote-sha)))
+      (org-social-file--handle-conflict local-path remote-content remote-etag)
+      'conflict)
+     ((and local base-sha
+           (not (equal local-sha base-sha))
+           (not (equal local-sha remote-sha)))
+      (if (equal remote-sha base-sha)
+          (progn
+            (message "Uploading local changes that were not on the host yet...")
+            (org-social-file--upload-vfile org-social-file local-path)
+            'local-ahead)
+        (org-social-file--handle-conflict local-path remote-content remote-etag)
+        'conflict))
+     (t
+      (let ((changed (not (equal local-sha remote-sha))))
+        (when changed
+          (org-social-file--write-local local-path remote-content))
+        (org-social-file--write-base local-path remote-etag remote-content)
+        (org-social-file--revert-visiting-buffer local-path changed))
+      'updated))))
+
+(defun org-social-file--refresh-vfile-cache ()
+  "Download the vfile feed synchronously and update the local copy.
+Unsaved changes in the local copy are handled first with
+`org-social-file--resolve-unsaved-changes'.  Return the result of
+`org-social-file--apply-remote', or nil if the host could not be
+reached (the local copy is then left as is)."
+  (let ((local-path (org-social-file--get-local-file-path org-social-file)))
+    (org-social-file--resolve-unsaved-changes local-path)
+    (message "Syncing from remote...")
+    (let ((response (org-social-file--fetch-remote-sync org-social-my-public-url)))
+      (if (org-social-file--response-ok-p response)
+          (prog1 (org-social-file--apply-remote local-path
+                                                (plist-get response :body)
+                                                (plist-get response :etag))
+            (message "Syncing from remote...done"))
+        (message "Warning: remote unreachable, using local version.")
+        nil))))
+
+;;;; Upload
+
+(defun org-social-file--state (local-path)
+  "Return the upload state plist of LOCAL-PATH."
+  (gethash (expand-file-name local-path) org-social-file--upload-state))
+
+(defun org-social-file--set-state (local-path &rest props)
+  "Set the upload state PROPS (a plist) of LOCAL-PATH."
+  (let* ((key (expand-file-name local-path))
+         (state (gethash key org-social-file--upload-state)))
+    (while props
+      (setq state (plist-put state (pop props) (pop props))))
+    (puthash key state org-social-file--upload-state))
+  (force-mode-line-update t))
+
+(defun org-social-file--upload-running-p (local-path)
+  "Return non-nil if an upload of LOCAL-PATH is running."
+  (let ((state (org-social-file--state local-path)))
+    (and (eq (plist-get state :status) 'uploading)
+         (plist-get state :started)
+         (< (- (float-time) (plist-get state :started))
+            org-social-file--upload-timeout))))
+
+(defun org-social-file--upload-succeeded (local-path)
+  "Mark the upload of LOCAL-PATH as done and run any pending upload."
+  (let ((pending (plist-get (org-social-file--state local-path) :pending)))
+    (org-social-file--set-state local-path :status nil :started nil :pending nil)
+    (when pending
+      (org-social-file--upload-vfile pending local-path))))
+
+(defun org-social-file--upload-failed (local-path reason &optional http-status body)
+  "Report that the upload of LOCAL-PATH failed because of REASON.
+HTTP-STATUS and BODY are the host answer, if any.  The failure is shown
+with `display-warning' and the buffer mode line until a later upload
+succeeds; the next save tries again."
+  (org-social-file--set-state local-path :status 'failed :started nil :pending nil)
+  (display-warning
+   'org-social
+   (format "Upload of %s to the host failed%s: %s.%s\nYour changes are safe in that file; they will be uploaded again the next time you save it."
+           (abbreviate-file-name local-path)
+           (if http-status (format " (HTTP %s)" http-status) "")
+           reason
+           (if (and body (not (string-empty-p (string-trim body))))
+               (format "\nHost answer: %s"
+                       (truncate-string-to-width (string-trim body) 500))
+             ""))
+   :error))
+
+(defun org-social-file--conflict-file-name (local-path)
+  "Return a new file name to keep the local version of LOCAL-PATH."
+  (let* ((stem (format "%s.conflict-%s" local-path
+                       (format-time-string "%Y%m%dT%H%M%S")))
+         (name stem)
+         (n 1))
+    (while (file-exists-p name)
+      (setq name (format "%s-%d" stem n)
+            n (1+ n)))
+    name))
+
+(defun org-social-file--open-conflict-ediff (conflict-file local-path)
+  "Compare CONFLICT-FILE (local version) and LOCAL-PATH (host version)."
+  (require 'ediff)
+  (ediff-files conflict-file local-path))
+
+(defun org-social-file--handle-conflict (local-path remote-content remote-etag)
+  "Keep both versions when LOCAL-PATH and the host changed independently.
+The local version (including unsaved changes) is copied to
+LOCAL-PATH.conflict-TIMESTAMP, LOCAL-PATH gets the host version
+REMOTE-CONTENT served with REMOTE-ETAG, a warning explains what
+happened and, if `org-social-vfile-conflict-ediff' is non-nil, `ediff'
+compares both files.  Return the conflict file name."
+  (let* ((buf (find-buffer-visiting local-path))
+         (local (if buf
+                    (with-current-buffer buf
+                      (buffer-substring-no-properties (point-min) (point-max)))
+                  (org-social-file--read-local local-path)))
+         (conflict-file (org-social-file--conflict-file-name local-path)))
+    (org-social-file--write-local conflict-file (or local ""))
+    (org-social-file--write-local local-path remote-content)
+    (org-social-file--write-base local-path remote-etag remote-content)
+    (when buf
+      (with-current-buffer buf
+        (revert-buffer t t t)))
+    (org-social-file--set-state local-path
+                                :status 'conflict :started nil :pending nil
+                                :conflict-file conflict-file)
+    (display-warning
+     'org-social
+     (format "Your feed changed on the host since Emacs downloaded it, probably because you published from another client.  Nothing was uploaded, so those posts were not deleted.
+- Your version is saved in %s
+- %s now has the version from the host
+Copy your changes into %s (ediff opens both files, your version is A) and save it to upload them.  To overwrite the host with your version instead, losing what was published elsewhere, run C-u M-x org-social-force-upload."
+             (abbreviate-file-name conflict-file)
+             (abbreviate-file-name local-path)
+             (file-name-nondirectory local-path))
+     :error)
+    (when (and (boundp 'org-social-vfile-conflict-ediff)
+               org-social-vfile-conflict-ediff)
+      (run-at-time 0 nil #'org-social-file--open-conflict-ediff
+                   conflict-file local-path))
+    conflict-file))
+
+(defun org-social-file--upload-after-check (vfile-url local-path response)
+  "Upload LOCAL-PATH to VFILE-URL if the feed in RESPONSE allows it.
+RESPONSE is the feed just downloaded from the host.  Upload only if it
+is still the version LOCAL-PATH is based on; otherwise keep both
+versions with `org-social-file--handle-conflict'."
+  (if (not (org-social-file--response-ok-p response))
+      (org-social-file--upload-failed
+       local-path
+       "could not download your feed to check for posts published elsewhere"
+       (plist-get response :status) (plist-get response :body))
+    (let* ((remote (plist-get response :body))
+           (remote-etag (plist-get response :etag))
+           (remote-sha (org-social-file--sha256 remote))
+           (local-sha (org-social-file--sha256
+                       (or (org-social-file--read-local local-path) "")))
+           (base-sha (plist-get (org-social-file--read-base local-path) :sha256)))
+      (cond
+       ;; The host already has this content.
+       ((equal local-sha remote-sha)
+        (org-social-file--write-base local-path remote-etag remote)
+        (org-social-file--upload-succeeded local-path))
+       ;; No local changes, only remote ones: take them.
+       ((equal local-sha base-sha)
+        (org-social-file--apply-remote local-path remote remote-etag)
+        (org-social-file--upload-succeeded local-path))
+       ;; Only local changes: safe to upload.
+       ((equal remote-sha base-sha)
+        (org-social-file--post-vfile vfile-url local-path remote-etag))
+       (t
+        (org-social-file--handle-conflict local-path remote remote-etag))))))
+
+(defun org-social-file--post-vfile (vfile-url local-path etag)
+  "POST LOCAL-PATH to the upload endpoint of the host of VFILE-URL.
+When ETAG is non-nil it is sent as If-Match, so the host refuses the
+upload with 412 if the feed changed in the meantime."
+  (let* ((content (or (org-social-file--read-local local-path) ""))
+         (public-url org-social-my-public-url)
+         (host-url (org-social-file--extract-host-from-vfile vfile-url))
+         (upload-url (concat host-url "/upload"))
+         (boundary (format "----EmacsFormBoundary%d" (random 1000000)))
+         (body (concat
+                "--" boundary "\r\n"
+                "Content-Disposition: form-data; name=\"vfile\"\r\n\r\n"
+                vfile-url "\r\n"
+                "--" boundary "\r\n"
+                "Content-Disposition: form-data; name=\"file\"; filename=\"social.org\"\r\n"
+                "Content-Type: text/plain; charset=utf-8\r\n\r\n"
+                content "\r\n"
+                "--" boundary "--\r\n"))
+         (url-request-method "POST")
+         (url-request-extra-headers
+          `(("Content-Type" . ,(format "multipart/form-data; boundary=%s" boundary))
+            ,@(when etag `(("If-Match" . ,etag)))))
+         (url-request-data (encode-coding-string body 'utf-8-unix)))
+    (message "Uploading file to %s..." host-url)
+    (url-retrieve
+     upload-url
+     (lambda (_status)
+       (let* ((response (condition-case nil
+                            (org-social-file--parse-response)
+                          (error nil)))
+              (http-status (plist-get response :status))
+              (response-body (plist-get response :body)))
+         (kill-buffer (current-buffer))
+         (cond
+          ((and http-status (>= http-status 200) (< http-status 300))
+           (org-social-file--write-base local-path (plist-get response :etag) content)
+           (org-social-file--upload-succeeded local-path)
+           (message "File uploaded successfully to host"))
+          ((eql http-status 412)
+           (org-social-file--fetch-remote
+            public-url
+            (lambda (remote)
+              (if (org-social-file--response-ok-p remote)
+                  (org-social-file--handle-conflict local-path
+                                                    (plist-get remote :body)
+                                                    (plist-get remote :etag))
+                (org-social-file--upload-failed
+                 local-path
+                 "your feed changed on the host and could not be downloaded to compare it"
+                 412 response-body)))))
+          ((eql http-status 401)
+           (org-social-file--upload-failed
+            local-path
+            "the vfile URL is invalid or incomplete, copy it again from your other client"
+            http-status response-body))
+          (http-status
+           (org-social-file--upload-failed local-path "the host rejected the upload"
+                                           http-status response-body))
+          (t
+           (org-social-file--upload-failed local-path "the host could not be reached")))))
+     nil t)))
+
+(defun org-social-file--upload-vfile (vfile-url local-path &optional force)
+  "Upload LOCAL-PATH to VFILE-URL without overwriting changes made elsewhere.
+The feed is first downloaded again and compared with the version
+LOCAL-PATH is based on.  If it changed (for example a post published
+from another client), nothing is uploaded and both versions are kept
+with `org-social-file--handle-conflict'.  With FORCE non-nil, upload
+without checking.  Everything runs asynchronously; a second upload
+requested while one is running waits for it to finish."
   (when (and (org-social-file--is-vfile-p vfile-url)
-             (file-exists-p local-file-path))
-    (let* ((host-url (org-social-file--extract-host-from-vfile vfile-url))
-           (upload-url (concat host-url "/upload"))
-           (boundary (format "----EmacsFormBoundary%d" (random 1000000)))
-           (file-content (with-temp-buffer
-                           (insert-file-contents-literally local-file-path)
-                           (encode-coding-string (buffer-string) 'utf-8)))
-           (body (concat
-                  "--" boundary "\r\n"
-                  "Content-Disposition: form-data; name=\"vfile\"\r\n\r\n"
-                  vfile-url "\r\n"
-                  "--" boundary "\r\n"
-                  "Content-Disposition: form-data; name=\"file\"; filename=\"social.org\"\r\n"
-                  "Content-Type: text/plain; charset=utf-8\r\n\r\n"
-                  file-content "\r\n"
-                  "--" boundary "--\r\n"))
-           (url-request-method "POST")
-           (url-request-extra-headers
-            `(("Content-Type" . ,(format "multipart/form-data; boundary=%s" boundary))))
-           (url-request-data (encode-coding-string body 'utf-8)))
-      (message "Uploading file to %s..." host-url)
-      (url-retrieve
-       upload-url
-       (lambda (status)
-         (let ((http-status nil)
-               (response-body "")
-               (current-buf (current-buffer)))
-           (condition-case err
-               (progn
-                 ;; Check for errors in status plist
-                 (when (plist-get status :error)
-                   (error "Upload failed: %S" (plist-get status :error)))
-
-                 ;; Extract HTTP status code
-                 (goto-char (point-min))
-                 (when (re-search-forward "^HTTP/[0-9.]+ \\([0-9]+\\)" nil t)
-                   (setq http-status (string-to-number (match-string 1))))
-
-                 ;; Extract response body (limit size to avoid huge messages)
-                 (goto-char (point-min))
-                 (when (re-search-forward "\r\n\r\n\\|\n\n" nil t)
-                   (let ((body-start (point)))
-                     (setq response-body (buffer-substring-no-properties
-                                          body-start
-                                          (min (+ body-start 500) (point-max)))))))
-             (error
-              (message "Error during upload: %s" (error-message-string err))))
-
-           ;; Kill buffer safely
-           (when (buffer-live-p current-buf)
-             (kill-buffer current-buf))
-
-           ;; Report result
-           (if (and http-status (= http-status 200))
-               (message "File uploaded successfully to host")
-             (message "Failed to upload file to host (status %s): %s"
-                      (or http-status "unknown")
-                      (string-trim response-body)))))
-       nil t))))
+             (file-exists-p local-path))
+    (let ((problem (org-social-file--vfile-url-problem vfile-url))
+          (public-url (and (boundp 'org-social-my-public-url)
+                           org-social-my-public-url)))
+      (cond
+       (problem
+        (org-social-file--upload-failed
+         local-path
+         (format "the vfile URL is invalid or incomplete (%s), copy it again from your other client"
+                 problem)))
+       ((not (and (stringp public-url) (not (string-empty-p public-url))))
+        (org-social-file--upload-failed
+         local-path "variable `org-social-my-public-url' is not set"))
+       ((org-social-file--upload-running-p local-path)
+        (org-social-file--set-state local-path :pending vfile-url))
+       (t
+        (org-social-file--set-state local-path
+                                    :status 'uploading :started (float-time)
+                                    :pending nil)
+        (if force
+            (org-social-file--post-vfile vfile-url local-path nil)
+          (org-social-file--fetch-remote
+           public-url
+           (lambda (response)
+             (org-social-file--upload-after-check vfile-url local-path response)))))))))
 
 (defun org-social-file--sync-vfile ()
   "Upload the current social file to the host if `org-social-file' is a vfile URL.
 This function is meant to be called from after-save-file-hook."
-  (when (and (boundp 'org-social-file)
+  (when (and (not org-social-file--inhibit-sync)
+             (boundp 'org-social-file)
              (org-social-file--is-vfile-p org-social-file))
     (let ((local-path (org-social-file--get-local-file-path org-social-file)))
       (when (and (buffer-file-name)
                  (file-equal-p (buffer-file-name) local-path))
         (org-social-file--upload-vfile org-social-file local-path)))))
+
+(defun org-social-file--save-and-sync ()
+  "Save the current buffer and upload it once if it is the vfile copy.
+The upload is triggered by `org-social-mode' hooks when they are
+installed, and explicitly otherwise."
+  (save-buffer)
+  (unless (memq #'org-social-file--auto-save after-save-hook)
+    (org-social-file--sync-vfile)))
+
+(defun org-social-file--last-conflict-file ()
+  "Return the last conflict copy of the current vfile, if it still exists."
+  (when (org-social-file--is-vfile-p org-social-file)
+    (let ((file (plist-get (org-social-file--state
+                            (org-social-file--get-local-file-path org-social-file))
+                           :conflict-file)))
+      (and file (file-exists-p file) file))))
+
+(defun org-social-file--force-upload (&optional file)
+  "Upload the vfile local copy even if the feed changed on the host.
+With FILE (for example a conflict copy), replace the local copy with it
+first.  Posts published from other clients since the last download are
+lost, so `yes-or-no-p' asks for confirmation."
+  (org-social-file--check-config)
+  (unless (org-social-file--is-vfile-p org-social-file)
+    (user-error "Variable `org-social-file' is not a vfile URL, there is nothing to upload"))
+  (let* ((local-path (org-social-file--get-local-file-path org-social-file))
+         (buf (find-buffer-visiting local-path)))
+    (when (org-social-file--upload-running-p local-path)
+      (user-error "An upload is already running, try again in a moment"))
+    (unless (file-exists-p (or file local-path))
+      (user-error "File %s does not exist" (or file local-path)))
+    (when (and file buf (buffer-modified-p buf))
+      (user-error "Save or revert %s first" (buffer-name buf)))
+    (unless (yes-or-no-p
+             (format "Posts published from other clients since the last download will be lost.  Overwrite your feed on the host with %s? "
+                     (abbreviate-file-name (or file local-path))))
+      (user-error "Upload cancelled"))
+    (cond
+     (file
+      (org-social-file--write-local local-path (org-social-file--read-local file))
+      (org-social-file--revert-visiting-buffer local-path t))
+     ((and buf (buffer-modified-p buf))
+      (with-current-buffer buf
+        (let ((org-social-file--inhibit-sync t))
+          (save-buffer)))))
+    (org-social-file--upload-vfile org-social-file local-path t)))
 
 (defun org-social-file--ensure-vfile-downloaded ()
   "Ensure vfile is downloaded to local cache if `org-social-file' is a vfile URL.
@@ -225,25 +694,34 @@ nil otherwise."
     (let ((local-path (org-social-file--get-local-file-path org-social-file)))
       (unless (file-exists-p local-path)
         (message "Downloading file from public URL for profile reading...")
-        (let ((content (org-social-file--download-vfile-sync org-social-my-public-url)))
-          (when content
-            (with-temp-file local-path
-              (insert content)
-              (set-buffer-file-coding-system 'utf-8-unix))
-            (message "File downloaded and cached")
-            t)))
+        (let ((response (org-social-file--fetch-remote-sync org-social-my-public-url)))
+          (when (org-social-file--response-ok-p response)
+            (org-social-file--apply-remote local-path
+                                           (plist-get response :body)
+                                           (plist-get response :etag))
+            (message "File downloaded and cached"))))
       ;; Return t if file exists now
       (file-exists-p local-path))))
+
+(defun org-social-file--mode-line-lighter ()
+  "Return the `org-social-mode' lighter, flagging failed uploads."
+  (pcase (and buffer-file-name
+              (plist-get (org-social-file--state buffer-file-name) :status))
+    ('failed (propertize " OrgSocial[upload failed]" 'face 'error))
+    ('conflict (propertize " OrgSocial[conflict]" 'face 'error))
+    (_ " OrgSocial")))
 
 ;; Minor mode definition
 (define-minor-mode org-social-mode
   "Minor mode for enhancing the Org-social experience."
-  :lighter " OrgSocial"
+  :lighter (:eval (org-social-file--mode-line-lighter))
   :keymap org-social-variables--mode-map
   :group 'org-social
   (if org-social-mode
       (progn
         (org-mode)
+        ;; `org-mode' kills local variables, including this mode's one
+        (setq org-social-mode t)
         ;; Use depth 90 to run AFTER delete-trailing-whitespace (depth 0)
         (add-hook 'before-save-hook #'org-social-file--before-save 90 t)
         (add-hook 'after-save-hook #'org-social-file--auto-save nil t))
@@ -275,9 +753,17 @@ nil otherwise."
 (defun org-social-file--save ()
   "Save the current Org-social file and run associated hooks."
   (interactive)
-  (save-buffer)
-  (unless org-social-mode
-    (org-social-file--auto-save)))
+  (let ((modified (buffer-modified-p)))
+    (save-buffer)
+    (cond
+     ((not (memq #'org-social-file--auto-save after-save-hook))
+      (org-social-file--auto-save))
+     ;; Nothing to save, so no hook ran: retry a failed upload
+     ((and (not modified)
+           buffer-file-name
+           (eq (plist-get (org-social-file--state buffer-file-name) :status)
+               'failed))
+      (org-social-file--sync-vfile)))))
 
 (defun org-social-file--find-posts-section ()
   "Find or create the Posts section in the current buffer."
@@ -405,14 +891,12 @@ and POLL-END is the RFC 3339 formatted end time."
   (message "New Org-social feed created! Please update your profile information."))
 
 (defun org-social-file--open-after-download (local-path)
-  "Open LOCAL-PATH with `org-social-mode' after a successful vfile download.
-Reverts the buffer if already visiting the file."
-  (let ((existing-buf (find-buffer-visiting local-path)))
-    (when existing-buf
-      (with-current-buffer existing-buf
-        (revert-buffer t t t))))
+  "Open LOCAL-PATH with `org-social-mode' after a vfile download.
+The buffer, if any, was already reloaded by
+`org-social-file--apply-remote' unless it had unsaved changes."
   (find-file local-path)
-  (org-social-mode 1)
+  (unless org-social-mode
+    (org-social-mode 1))
   (org-social-file--process-migrations)
   (goto-char (point-max))
   (when (fboundp 'org-social-validator-validate-and-display)
@@ -421,44 +905,42 @@ Reverts the buffer if already visiting the file."
 
 (defun org-social-file--open ()
   "Open the Org-social feed file and enable `org-social-mode'.
-For vfile URLs, the remote is always the source of truth: the file is
-always downloaded before opening.  If the download fails, the local
+For vfile URLs the file is downloaded before opening, without losing
+unsaved or unuploaded local changes.  If the download fails, the local
 cache is used as a fallback."
+  (org-social-file--check-config)
   (if (org-social-file--is-vfile-p org-social-file)
       ;; Handle vfile URL: remote is authoritative
       (let ((local-path (org-social-file--get-local-file-path org-social-file)))
-        (if (not (and (boundp 'org-social-my-public-url) org-social-my-public-url))
-            (error "Org-social-my-public-url must be set to use vfile")
-          (message "Downloading from remote...")
-          (org-social-file--download-vfile
-           org-social-my-public-url
-           (lambda (content)
-             (if content
+        (org-social-file--resolve-unsaved-changes local-path)
+        (message "Downloading from remote...")
+        (org-social-file--download-vfile
+         org-social-my-public-url
+         (lambda (content &optional etag)
+           (if content
+               (progn
+                 (org-social-file--apply-remote local-path content etag)
+                 (org-social-file--open-after-download local-path)
+                 (message "Loaded from remote. Save to sync changes back."))
+             ;; Download failed: fall back to cache or offer to create new file
+             (if (file-exists-p local-path)
                  (progn
-                   (with-temp-file local-path
-                     (insert content)
-                     (set-buffer-file-coding-system 'utf-8-unix))
-                   (org-social-file--open-after-download local-path)
-                   (message "Loaded from remote. Save to sync changes back."))
-               ;; Download failed: fall back to cache or offer to create new file
-               (if (file-exists-p local-path)
-                   (progn
-                     (message "Warning: remote unreachable, opening local cache.")
-                     (org-social-file--open-after-download local-path))
-                 (when (y-or-n-p "Failed to download vfile and no local cache.  Create new local file? ")
-                   (with-temp-file local-path
-                     (insert "#+TITLE: My Social Feed\n")
-                     (insert "#+NICK: YourNick\n")
-                     (insert "#+DESCRIPTION: A brief description about yourself\n")
-                     (insert "#+AVATAR: https://example.com/avatar.jpg\n")
-                     (insert "#+LINK: https://your-website.com\n\n")
-                     (insert "* Posts\n")
-                     (set-buffer-file-coding-system 'utf-8-unix))
-                   (find-file local-path)
-                   (org-social-mode 1)
-                   (goto-char (point-min))
-                   (search-forward "YourNick")
-                   (message "New file created. Update your profile and save to sync with host."))))))))
+                   (message "Warning: remote unreachable, opening local cache.")
+                   (org-social-file--open-after-download local-path))
+               (when (y-or-n-p "Failed to download vfile and no local cache.  Create new local file? ")
+                 (with-temp-file local-path
+                   (insert "#+TITLE: My Social Feed\n")
+                   (insert "#+NICK: YourNick\n")
+                   (insert "#+DESCRIPTION: A brief description about yourself\n")
+                   (insert "#+AVATAR: https://example.com/avatar.jpg\n")
+                   (insert "#+LINK: https://your-website.com\n\n")
+                   (insert "* Posts\n")
+                   (set-buffer-file-coding-system 'utf-8-unix))
+                 (find-file local-path)
+                 (org-social-mode 1)
+                 (goto-char (point-min))
+                 (search-forward "YourNick")
+                 (message "New file created. Update your profile and save to sync with host.")))))))
     ;; Handle local file path
     (if (file-exists-p org-social-file)
         (progn
@@ -482,33 +964,29 @@ cache is used as a fallback."
   "Ensure the social file is open and current before any write operation.
 For vfile URLs, always downloads from remote synchronously so concurrent
 edits from other clients are incorporated before inserting new content.
-Falls back to the local cache if the remote is unreachable.
+Unsaved changes are never discarded silently, see
+`org-social-file--resolve-unsaved-changes'.  Falls back to the local
+cache if the remote is unreachable.
 For local files, opens the file if not already visiting."
+  (org-social-file--check-config)
   (let ((target-file (if (org-social-file--is-vfile-p org-social-file)
                          (org-social-file--get-local-file-path org-social-file)
                        org-social-file)))
     (if (org-social-file--is-vfile-p org-social-file)
-        (if (not (and (boundp 'org-social-my-public-url) org-social-my-public-url))
-            (error "Org-social-my-public-url must be set to use vfile")
-          (message "Syncing from remote...")
-          (let ((content (org-social-file--download-vfile-sync org-social-my-public-url)))
-            (if content
-                (progn
-                  (with-temp-file target-file
-                    (insert content)
-                    (set-buffer-file-coding-system 'utf-8-unix))
-                  (let ((buf (find-buffer-visiting target-file)))
-                    (if buf
-                        (with-current-buffer buf
-                          (revert-buffer t t t))
-                      (find-file target-file)
-                      (org-social-mode 1)
-                      (org-social-file--process-migrations))))
-              (message "Warning: remote unreachable, using local version.")
-              (unless (find-buffer-visiting target-file)
-                (when (file-exists-p target-file)
-                  (find-file target-file)
-                  (org-social-mode 1))))))
+        (progn
+          (org-social-file--refresh-vfile-cache)
+          (let ((buf (find-buffer-visiting target-file)))
+            (cond
+             (buf
+              (with-current-buffer buf
+                (unless org-social-mode
+                  (org-social-mode 1))))
+             ((file-exists-p target-file)
+              (find-file target-file)
+              (org-social-mode 1)
+              (org-social-file--process-migrations))
+             (t
+              (user-error "Cannot reach the host and there is no local copy of your feed")))))
       (unless (and (buffer-file-name)
                    (string= (expand-file-name (buffer-file-name))
                             (expand-file-name target-file)))
@@ -937,39 +1415,40 @@ Optional REPLY-URL and REPLY-ID are passed to create a reply post."
 
 (defun org-social-file--edit-post (timestamp)
   "Open social.org and position cursor at the post with TIMESTAMP.
-TIMESTAMP is the post ID (e.g., '2025-04-28T12:00:00+0100')."
+TIMESTAMP is the post ID (e.g., \"2025-04-28T12:00:00+0100\").
+For vfile URLs the feed is downloaded first, so posts published from
+other clients are not lost when saving the edit."
   (interactive)
+  (org-social-file--ensure-open-and-fresh)
   (let ((target-file (if (org-social-file--is-vfile-p org-social-file)
                          (org-social-file--get-local-file-path org-social-file)
                        org-social-file)))
-    ;; Open the social.org file
-    (if (file-exists-p target-file)
-        (progn
-          (find-file target-file)
-          (org-social-mode 1)
-          ;; Search for the post with the given timestamp
-          (goto-char (point-min))
-          (let ((search-pattern (format "^:ID:\\s-*%s" (regexp-quote timestamp))))
-            (if (re-search-forward search-pattern nil t)
-		(progn
-                  ;; Found the ID line, now navigate to the post content
-                  (beginning-of-line)
-                  ;; Search forward for :END: to skip the properties drawer
-                  (if (re-search-forward "^:END:\\s-*$" nil t)
-                      (progn
-			;; Move to the line after :END:
-			(forward-line 1)
-			;; Skip any blank lines
-			(while (and (not (eobp))
-                                    (looking-at "^\\s-*$"))
-                          (forward-line 1))
-			;; Now we should be at the content
-			(message "Editing post from %s" timestamp))
-                    ;; If :END: not found, just position after the ID
-                    (message "Warning: Could not find :END: for post %s" timestamp)))
-              (message "Post with timestamp %s not found" timestamp)
-              (goto-char (point-max)))))
-      (message "Social file not found: %s" target-file))))
+    (if (not (and (buffer-file-name)
+                  (file-equal-p (buffer-file-name) target-file)))
+        (message "Social file not found: %s" target-file)
+      ;; Search for the post: ID in the header (v1.6) or in the properties
+      (goto-char (point-min))
+      (let ((id (regexp-quote timestamp)))
+        (if (re-search-forward
+             (format "^\\(?:\\*\\*[ \t]+%s\\|:ID:[ \t]*%s\\)[ \t]*$" id id)
+             nil t)
+            (progn
+              (beginning-of-line)
+              ;; Search forward for :END: to skip the properties drawer
+              (if (re-search-forward "^:END:\\s-*$" nil t)
+                  (progn
+                    ;; Move to the line after :END:
+                    (forward-line 1)
+                    ;; Skip any blank lines
+                    (while (and (not (eobp))
+                                (looking-at "^\\s-*$"))
+                      (forward-line 1))
+                    ;; Now we should be at the content
+                    (message "Editing post from %s" timestamp))
+                ;; If :END: not found, just position after the ID
+                (message "Warning: Could not find :END: for post %s" timestamp)))
+          (message "Post with timestamp %s not found" timestamp)
+          (goto-char (point-max)))))))
 
 (defun org-social-file--new-migration ()
   "Create a new migration post in your Org-social feed.
@@ -1116,7 +1595,7 @@ Returns the number of replacements made."
   "Process the latest migration in the current buffer.
 Finds the most recent migration post and applies the URL replacement.
 This function is called automatically when opening the social.org file."
-  (when-let ((migration (org-social-file--find-latest-migration)))
+  (when-let* ((migration (org-social-file--find-latest-migration)))
     (let ((old-url (alist-get 'old-url migration))
           (new-url (alist-get 'new-url migration))
           (id (alist-get 'id migration)))
@@ -1137,7 +1616,7 @@ or nil if no migration found."
 (defun org-social-file--process-remote-migration (feed-url feed-content)
   "Process migration from a remote FEED-URL with FEED-CONTENT.
 Updates our local social.org file if a migration is found."
-  (when-let ((migration (org-social-file--find-migration-in-feed feed-content)))
+  (when-let* ((migration (org-social-file--find-migration-in-feed feed-content)))
     (let ((old-url (alist-get 'old-url migration))
           (new-url (alist-get 'new-url migration)))
       ;; Only process if the old URL matches the feed URL we're downloading

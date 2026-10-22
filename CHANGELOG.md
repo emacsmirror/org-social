@@ -1,5 +1,20 @@
 # 📝 Changelog
 
+## 2.16
+
+- **Bug Fixes**:
+  - Saving `v-social.org` no longer deletes posts published from other clients (Android, iOS, web...). Before uploading, the feed is downloaded again and compared with the version Emacs last downloaded; if it changed, nothing is uploaded, your version is kept in `v-social.org.conflict-TIMESTAMP`, `v-social.org` gets the host version and `ediff` opens both so you can copy your changes back. Uploads also send `If-Match` with the feed ETag, so a host that supports it refuses an upload racing with another client (412).
+  - Downloads bypass caches (`_t` parameter, `Cache-Control: no-cache` and `Pragma: no-cache`) and the ETag of the downloaded feed is remembered in `v-social.org.etag`, so it survives Emacs restarts.
+  - Editing a post, voting in a poll and following or unfollowing from Discover download the feed before modifying it, as creating a post, reaction or boost already did. Editing also finds posts whose ID is in the header (v1.6).
+  - Reloading the feed never discards unsaved changes in `v-social.org`: Emacs asks whether to save them, discard them or abort. Changes saved while the upload failed are no longer overwritten by the next download; they are uploaded instead.
+  - The `org-social-mode` lighter is shown again (`org-mode` was resetting the mode variable).
+- **New warnings**:
+  - Upload failures (invalid vfile, 412, network, 5xx) are shown with `display-warning` including the HTTP status and the host answer, and the mode line shows `OrgSocial[upload failed]` or `OrgSocial[conflict]`. Saving again, even without changes, retries the upload.
+  - A 401 from the host says the vfile URL is invalid or incomplete and must be copied again from your other client.
+  - `org-social-file` is validated: a vfile URL must have `https://`, the `/vfile` path and complete `token`, `ts` and `sig` parameters, and a URL pasted without `https://` raises an error instead of being used as a local file that is never uploaded.
+- **New command** `org-social-force-upload`: overwrite the host with your local copy after confirmation; with `C-u`, upload a file such as the last conflict copy.
+- **New option** `org-social-vfile-conflict-ediff` (default `t`): open `ediff` on conflicts.
+
 ## 2.15
 
 - **Bug Fixes**:

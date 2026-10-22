@@ -3,7 +3,7 @@
 ;; SPDX-License-Identifier: GPL-3.0
 
 ;; Author: Andros Fenollosa <hi@andros.dev>
-;; Version: 2.15
+;; Version: 2.16
 ;; URL: https://git.andros.dev/org-social/org-social.el
 
 ;; This file is NOT part of GNU Emacs.
@@ -38,6 +38,15 @@
 (defcustom org-social-file "~/social.org"
   "Path to your Org-social feed file."
   :type 'file
+  :group 'org-social)
+
+(defcustom org-social-vfile-conflict-ediff t
+  "When non-nil, open `ediff' when an upload to the host hits a conflict.
+A conflict happens when your feed changed on the host (for example a
+post published from another client) while you edited your local copy.
+Your version is then kept in a .conflict-TIMESTAMP file next to it, and
+ediff compares it with the host version so you can copy your changes."
+  :type 'boolean
   :group 'org-social)
 
 (defcustom org-social-hide-post-buttons nil

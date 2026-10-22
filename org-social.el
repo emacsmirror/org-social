@@ -1,6 +1,6 @@
 ;;; org-social.el --- An Org-social client -*- lexical-binding: t -*- -*- coding: utf-8 -*-
 ;; Author: Andros Fenollosa <hi@andros.dev>
-;; Version: 2.15
+;; Version: 2.16
 ;; URL: https://git.andros.dev/org-social/org-social.el
 ;; Package-Requires: ((emacs "30.1") (org "9.0") (request "0.3.0") (seq "2.20") (emojify "1.2") (async-http-queue "0.1"))
 ;; SPDX-License-Identifier: GPL-3.0
@@ -48,6 +48,8 @@
 (declare-function org-social-file--new-reply-at-point "org-social-file" ())
 (declare-function org-social-file--new-poll "org-social-file" ())
 (declare-function org-social-file--new-migration "org-social-file" ())
+(declare-function org-social-file--force-upload "org-social-file" (&optional file))
+(declare-function org-social-file--last-conflict-file "org-social-file" ())
 (declare-function org-social-ui-timeline "org-social-ui" ())
 (declare-function org-social-validator-validate-buffer "org-social-validator" ())
 (declare-function org-social-validator-validate-and-display "org-social-validator" ())
@@ -205,6 +207,26 @@ your social.org file to create a new post replying to it."
   (interactive)
   (org-social--ensure-loaded)
   (org-social-file--new-migration))
+
+;;;###autoload
+(defun org-social-force-upload (&optional file)
+  "Overwrite your feed on the host with your local vfile copy.
+Normally an upload is cancelled when the feed changed on the host since
+Emacs downloaded it, so posts published from other clients are not
+deleted.  This command uploads anyway, after confirmation.  With a
+prefix argument, ask for a FILE to upload instead, by default the last
+conflict copy."
+  (interactive
+   (progn
+     (org-social--ensure-loaded)
+     (list (when current-prefix-arg
+             (let ((default (org-social-file--last-conflict-file)))
+               (read-file-name "File to upload: "
+                               (and default (file-name-directory default))
+                               default t
+                               (and default (file-name-nondirectory default))))))))
+  (org-social--ensure-loaded)
+  (org-social-file--force-upload file))
 
 ;;;###autoload
 (defun org-social-check-relay-mentions ()

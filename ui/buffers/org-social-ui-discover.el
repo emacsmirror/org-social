@@ -2,7 +2,7 @@
 
 ;; SPDX-License-Identifier: GPL-3.0
 ;; Author: Andros Fenollosa <hi@andros.dev>
-;; Version: 2.15
+;; Version: 2.16
 ;; URL: https://git.andros.dev/org-social/org-social.el
 
 ;;; Commentary:
@@ -20,6 +20,9 @@
 
 ;; Forward declarations
 (declare-function org-social-relay--fetch-feeds "org-social-relay" (callback))
+(declare-function org-social-file--is-vfile-p "org-social-file" (file-path))
+(declare-function org-social-file--refresh-vfile-cache "org-social-file" ())
+(declare-function org-social-file--save-and-sync "org-social-file" ())
 (declare-function org-social-parser--get-my-profile "org-social-parser" ())
 (declare-function org-social-parser--get-value "org-social-parser" (feed property))
 (declare-function org-social-ui-timeline "org-social-ui-timeline" ())
@@ -109,6 +112,9 @@
                               (fboundp 'org-social-file--get-local-file-path))
                          (org-social-file--get-local-file-path org-social-file)
                        org-social-file)))
+    ;; Download the feed first so posts published elsewhere are kept
+    (when (org-social-file--is-vfile-p org-social-file)
+      (org-social-file--refresh-vfile-cache))
     (when (file-exists-p target-file)
       (with-current-buffer (find-file-noselect target-file)
 	(save-excursion
@@ -118,23 +124,15 @@
               (progn
 		(beginning-of-line)
 		(insert (format "#+FOLLOW: %s %s\n" nick feed-url))
-		(save-buffer)
-		;; Sync to host if vfile
-		(when (and (fboundp 'org-social-file--is-vfile-p)
-			   (org-social-file--is-vfile-p org-social-file)
-			   (fboundp 'org-social-file--sync-vfile))
-		  (org-social-file--sync-vfile))
+		;; Save, and upload to the host if vfile
+		(org-social-file--save-and-sync)
 		(message "Now following %s" nick))
             ;; If no Posts section, add at the end of file
             (goto-char (point-max))
             (unless (bolp) (insert "\n"))
             (insert (format "#+FOLLOW: %s %s\n" nick feed-url))
-            (save-buffer)
-	    ;; Sync to host if vfile
-	    (when (and (fboundp 'org-social-file--is-vfile-p)
-		       (org-social-file--is-vfile-p org-social-file)
-		       (fboundp 'org-social-file--sync-vfile))
-	      (org-social-file--sync-vfile))
+            ;; Save, and upload to the host if vfile
+	    (org-social-file--save-and-sync)
             (message "Now following %s" nick)))
         ;; Reload profile
         (setq org-social-variables--my-profile (org-social-parser--get-my-profile))
@@ -149,6 +147,9 @@ NICK is the user's nickname."
                               (fboundp 'org-social-file--get-local-file-path))
                          (org-social-file--get-local-file-path org-social-file)
                        org-social-file)))
+    ;; Download the feed first so posts published elsewhere are kept
+    (when (org-social-file--is-vfile-p org-social-file)
+      (org-social-file--refresh-vfile-cache))
     (when (file-exists-p target-file)
       (with-current-buffer (find-file-noselect target-file)
 	(save-excursion
@@ -157,12 +158,8 @@ NICK is the user's nickname."
           (when (re-search-forward (format "^#\\+FOLLOW:.*%s" (regexp-quote feed-url)) nil t)
             (beginning-of-line)
             (kill-line 1)
-            (save-buffer)
-	    ;; Sync to host if vfile
-	    (when (and (fboundp 'org-social-file--is-vfile-p)
-		       (org-social-file--is-vfile-p org-social-file)
-		       (fboundp 'org-social-file--sync-vfile))
-	      (org-social-file--sync-vfile))
+            ;; Save, and upload to the host if vfile
+	    (org-social-file--save-and-sync)
             (message "Unfollowed %s" nick)))
         ;; Reload profile
         (setq org-social-variables--my-profile (org-social-parser--get-my-profile))

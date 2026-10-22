@@ -178,6 +178,8 @@ When using a vfile:
 - The file is automatically downloaded from the host when you open it
 - Your local copy is cached as `~/.emacs.d/v-social.org` (single-account) or `~/.emacs.d/v-social-ACCOUNT.org` (multi-account)
 - Every time you save (`C-x C-s`), changes are automatically uploaded to the host
+- Before uploading, the feed is downloaded again (bypassing caches). If it changed on the host since Emacs downloaded it, for example because you published from another client, nothing is uploaded: your version is kept in `v-social.org.conflict-TIMESTAMP`, `v-social.org` gets the host version and `ediff` opens both so you can copy your changes back (disable it with `org-social-vfile-conflict-ediff`). `C-u M-x org-social-force-upload` overwrites the host with your version instead
+- Upload errors (an invalid vfile URL, a network failure...) are shown as warnings and in the mode line, and the upload is retried the next time you save
 - Uses native Emacs url-retrieve functions (no external dependencies required)
 
 #### Multi-Account Configuration

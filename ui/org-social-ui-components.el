@@ -2,7 +2,7 @@
 
 ;; SPDX-License-Identifier: GPL-3.0
 ;; Author: Andros Fenollosa <hi@andros.dev>
-;; Version: 2.15
+;; Version: 2.16
 ;; URL: https://git.andros.dev/org-social/org-social.el
 
 ;;; Commentary:
@@ -25,6 +25,8 @@
 (declare-function org-social-file--new-post "org-social-file" (&optional reply-url reply-id))
 (declare-function org-social-file--new-poll "org-social-file" ())
 (declare-function org-social-file--edit-post "org-social-file" (timestamp))
+(declare-function org-social-file--ensure-open-and-fresh "org-social-file" ())
+(declare-function org-social-file--save-and-sync "org-social-file" ())
 (declare-function org-social-ui-timeline "org-social-ui-timeline" ())
 (declare-function org-social-ui-notifications "org-social-ui-notifications" ())
 (declare-function org-social-ui-groups "org-social-ui-groups" ())
@@ -113,17 +115,9 @@ AUTHOR-URL and TIMESTAMP identify the poll.
 POLL-OPTION is the selected option."
   (require 'org-social-file)
   (require 'org-social-parser)
-  ;; Determine target file (handle vfile URLs)
-  (let ((target-file (if (and (fboundp 'org-social-file--is-vfile-p)
-                              (org-social-file--is-vfile-p org-social-file)
-                              (fboundp 'org-social-file--get-local-file-path))
-                         (org-social-file--get-local-file-path org-social-file)
-                       org-social-file)))
-    ;; Open social.org file (or local vfile cache)
-    (unless (and (buffer-file-name)
-                 (string= (expand-file-name (buffer-file-name))
-                          (expand-file-name target-file)))
-      (find-file target-file))
+  ;; Download the feed first so posts published elsewhere are kept
+  (org-social-file--ensure-open-and-fresh)
+  (let ((target-file (buffer-file-name)))
     ;; Find posts section
     (goto-char (point-min))
     (unless (re-search-forward "^\\* Posts" nil t)
@@ -138,13 +132,9 @@ POLL-OPTION is the selected option."
       (insert (format ":REPLY_TO: %s#%s\n" author-url timestamp))
       (insert (format ":POLL_OPTION: %s\n" poll-option))
       (insert ":END:\n\n")
-      (save-buffer)
+      ;; Save, and upload to the vfile host if using vfile
+      (org-social-file--save-and-sync)
       (message "Vote created for option: %s" poll-option))
-    ;; Sync to vfile host if using vfile
-    (when (and (fboundp 'org-social-file--is-vfile-p)
-               (org-social-file--is-vfile-p org-social-file)
-               (fboundp 'org-social-file--sync-vfile))
-      (org-social-file--sync-vfile))
     ;; Move cursor to end and recenter
     (goto-char (point-max))
     (recenter -3)
