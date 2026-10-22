@@ -400,19 +400,63 @@ Each one is a plist (:method :url :headers :data).")
 ;;; vfile URL validation
 
 (ert-deftest org-social-vfile-test-url-validation ()
-  "Valid vfile URLs pass; truncated ones are explained."
-  (should-not (org-social-file--vfile-url-problem org-social-vfile-test--vfile))
-  (should (org-social-file--vfile-url-problem
-           (substring org-social-vfile-test--vfile 0 -10)))
-  (should (org-social-file--vfile-url-problem
-           (car (split-string org-social-vfile-test--vfile "&sig="))))
-  (should (org-social-file--vfile-url-problem "https://host.example/test/social.org"))
-  (should (org-social-file--schemeless-url-p
-           (substring org-social-vfile-test--vfile (length "https://"))))
-  (should (org-social-file--schemeless-url-p "host.example/test/social.org"))
-  (should-not (org-social-file--schemeless-url-p "~/social.org"))
-  (should-not (org-social-file--schemeless-url-p "/home/me/social.org"))
-  (should-not (org-social-file--schemeless-url-p "social.org")))
+  "Valid vfile URLs pass; truncated or wrong ones are explained."
+  (let ((vfile org-social-vfile-test--vfile)
+        (token (make-string 64 ?a))
+        (sig (make-string 64 ?b)))
+    ;; Complete URL, also in another order, under a path or with spaces
+    (should-not (org-social-file--vfile-url-problem vfile))
+    (should-not (org-social-file--vfile-url-problem
+                 (format "https://host.example/vfile?sig=%s&token=%s&ts=1" sig token)))
+    (should-not (org-social-file--vfile-url-problem
+                 (format "https://host.example/org/vfile?token=%s&ts=1&sig=%s" token sig)))
+    (should-not (org-social-file--vfile-url-problem (concat "  " vfile "\n")))
+    ;; Copied partially
+    (should (string-match-p "sig.*truncated"
+                            (org-social-file--vfile-url-problem (substring vfile 0 -1))))
+    (should (org-social-file--vfile-url-problem (car (split-string vfile "&sig="))))
+    (should (string-match-p "missing"
+                            (org-social-file--vfile-url-problem
+                             (car (split-string vfile "?")))))
+    (should (org-social-file--vfile-url-problem
+             (format "https://host.example/vfile?token=%s&ts=1&sig=%s"
+                     (substring token 1) sig)))
+    ;; Uppercase hex is not what the host generates
+    (should (org-social-file--vfile-url-problem
+             (format "https://host.example/vfile?token=%s&ts=1&sig=%s"
+                     (upcase token) sig)))
+    ;; ts not numeric
+    (should (string-match-p "ts.*not a number"
+                            (org-social-file--vfile-url-problem
+                             (format "https://host.example/vfile?token=%s&ts=12a&sig=%s"
+                                     token sig))))
+    ;; The public URL of the feed pasted by mistake
+    (should (string-match-p "public URL"
+                            (org-social-file--vfile-url-problem
+                             "https://host.org-social.org/nick/social.org")))
+    ;; Without scheme
+    (should (org-social-file--schemeless-url-p (substring vfile (length "https://"))))
+    (should (org-social-file--schemeless-url-p "host.example/test/social.org"))
+    (should (org-social-file--schemeless-url-p
+             (concat " " (substring vfile (length "https://")) "\n")))
+    (should-not (org-social-file--schemeless-url-p "~/social.org"))
+    (should-not (org-social-file--schemeless-url-p "/home/me/social.org"))
+    (should-not (org-social-file--schemeless-url-p "social.org"))))
+
+(ert-deftest org-social-vfile-test-config-errors-explain-the-problem ()
+  "The `user-error' says what is wrong with `org-social-file'."
+  (org-social-vfile-test--with-host
+   (let ((org-social-file (substring org-social-vfile-test--vfile (length "https://"))))
+     (should (string-match-p "without \"https://\""
+                             (cadr (should-error (org-social-file--check-config)
+                                                 :type 'user-error)))))
+   (let ((org-social-file "https://host.org-social.org/nick/social.org"))
+     (should (string-match-p "public URL of your feed, not the vfile URL"
+                             (cadr (should-error (org-social-file--check-config)
+                                                 :type 'user-error)))))
+   (let ((org-social-file (concat " " org-social-vfile-test--vfile "\n")))
+     (org-social-file--check-config)
+     (should (equal org-social-file org-social-vfile-test--vfile)))))
 
 (ert-deftest org-social-vfile-test-bad-vfile-url-is-a-user-error ()
   "A vfile URL without scheme or truncated signals a `user-error'."

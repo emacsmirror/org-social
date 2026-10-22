@@ -1,5 +1,13 @@
 # 📝 Changelog
 
+## 2.18
+
+- **Stricter vfile URL validation**, matching the host and the Android app:
+  - `token` and `sig` must be 64 lowercase hexadecimal characters and `ts` a number, so a vfile URL copied only partially is detected instead of failing silently.
+  - Spaces and newlines around `org-social-file` and `org-social-my-public-url` are ignored.
+  - The path only needs to end with `/vfile` and the parameters may come in any order.
+  - Pasting the public URL of the feed (`https://HOST/NICK/social.org`) instead of the vfile URL is explained as such.
+
 ## 2.17
 
 - **Automatic retry on conflicts for package actions** (same behavior as client-core on Android, iOS and the TUI):

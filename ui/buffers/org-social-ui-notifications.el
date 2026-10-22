@@ -2,7 +2,7 @@
 
 ;; SPDX-License-Identifier: GPL-3.0
 ;; Author: Andros Fenollosa <hi@andros.dev>
-;; Version: 2.17
+;; Version: 2.18
 ;; URL: https://git.andros.dev/org-social/org-social.el
 
 ;;; Commentary:
