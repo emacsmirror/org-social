@@ -3,7 +3,7 @@
 ;; SPDX-License-Identifier: GPL-3.0
 
 ;; Author: Andros Fenollosa <hi@andros.dev>
-;; Version: 2.16
+;; Version: 2.17
 ;; URL: https://git.andros.dev/org-social/org-social.el
 
 ;; This file is NOT part of GNU Emacs.
@@ -35,6 +35,8 @@
 (require 'org-id)
 (require 'url)
 (require 'url-parse)
+(require 'seq)
+(require 'parse-time)
 
 ;; Optional require with error handling
 (condition-case nil
@@ -190,13 +192,15 @@ _VFILE-URL is ignored but kept for API compatibility."
 
 (defun org-social-file--read-base (local-path)
   "Return the remote version LOCAL-PATH was last synchronized with.
-The value is a plist (:etag ETAG :sha256 HASH), where ETAG may be nil
+The value is a plist (:etag ETAG :sha256 HASH :content CONTENT), where
+CONTENT may be missing in files written by older versions, ETAG may be nil
 when the host sent none, or nil when the version is unknown."
   (let ((file (org-social-file--base-file local-path)))
     (when (file-readable-p file)
       (condition-case nil
           (with-temp-buffer
-            (insert-file-contents file)
+            (let ((coding-system-for-read 'utf-8-unix))
+              (insert-file-contents file))
             (let ((base (read (current-buffer))))
               (when (and (listp base) (stringp (plist-get base :sha256)))
                 base)))
@@ -204,11 +208,15 @@ when the host sent none, or nil when the version is unknown."
 
 (defun org-social-file--write-base (local-path etag content)
   "Remember that LOCAL-PATH matches the remote CONTENT served with ETAG.
-The ETag and a SHA-256 of CONTENT are stored next to LOCAL-PATH so they
-survive Emacs restarts."
+The ETag, a SHA-256 of CONTENT and CONTENT itself are stored next to
+LOCAL-PATH so they survive Emacs restarts."
   (with-temp-file (org-social-file--base-file local-path)
-    (prin1 (list :etag etag :sha256 (org-social-file--sha256 content))
-           (current-buffer))
+    (set-buffer-file-coding-system 'utf-8-unix)
+    (let ((print-escape-newlines t))
+      (prin1 (list :etag etag
+                   :sha256 (org-social-file--sha256 content)
+                   :content content)
+             (current-buffer)))
     (insert "\n")))
 
 ;;;; HTTP
@@ -247,22 +255,50 @@ decoded as UTF-8.  CODE is nil if there is no HTTP status line."
   (let ((status (plist-get response :status)))
     (and status (>= status 200) (< status 300))))
 
+(defvar-local org-social-file--skip-http-auth nil
+  "Non-nil in url.el buffers whose 401 answers go straight to the callback.")
+(put 'org-social-file--skip-http-auth 'permanent-local t)
+
+(defun org-social-file--skip-http-auth (orig-fun &rest args)
+  "Around advice of `url-http-handle-authentication'.
+In requests made by `org-social-file--url-retrieve', return t so that
+url.el gives the 401 answer to the callback, instead of asking for a
+user and password (or storing empty credentials and sending them to
+every later request to the host).  Otherwise call ORIG-FUN with ARGS."
+  (if org-social-file--skip-http-auth
+      t
+    (apply orig-fun args)))
+
+(defun org-social-file--url-retrieve (url callback)
+  "Retrieve URL silently with `url-retrieve' and call CALLBACK.
+A 401 answer reaches CALLBACK like any other HTTP error: the host uses
+it for an invalid vfile, which no user and password can fix."
+  (unless (advice-member-p #'org-social-file--skip-http-auth
+                           'url-http-handle-authentication)
+    (advice-add 'url-http-handle-authentication :around
+                #'org-social-file--skip-http-auth))
+  (let ((buffer (url-retrieve url callback nil t)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (setq org-social-file--skip-http-auth t)))
+    buffer))
+
 (defun org-social-file--fetch-remote (url callback)
   "Fetch URL asynchronously, bypassing caches.
 Call CALLBACK with the plist of `org-social-file--parse-response', or
 with nil if the host could not be reached."
   (let ((url-request-method "GET")
         (url-request-data nil)
+        (url-request-noninteractive t)
         (url-request-extra-headers org-social-file--no-cache-headers))
-    (url-retrieve
+    (org-social-file--url-retrieve
      (org-social-file--no-cache-url url)
      (lambda (_status)
        (let ((response (condition-case nil
                            (org-social-file--parse-response)
                          (error nil))))
          (kill-buffer (current-buffer))
-         (funcall callback (and (plist-get response :status) response))))
-     nil t)))
+         (funcall callback (and (plist-get response :status) response)))))))
 
 (defun org-social-file--fetch-remote-sync (url)
   "Fetch URL synchronously, bypassing caches.
@@ -271,6 +307,7 @@ host could not be reached."
   (condition-case err
       (let* ((url-request-method "GET")
              (url-request-data nil)
+             (url-request-noninteractive t)
              (url-request-extra-headers org-social-file--no-cache-headers)
              (buffer (url-retrieve-synchronously
                       (org-social-file--no-cache-url url) t nil 10)))
@@ -459,18 +496,21 @@ succeeds; the next save tries again."
   (require 'ediff)
   (ediff-files conflict-file local-path))
 
-(defun org-social-file--handle-conflict (local-path remote-content remote-etag)
+(defun org-social-file--handle-conflict (local-path remote-content remote-etag
+                                                    &optional local-content)
   "Keep both versions when LOCAL-PATH and the host changed independently.
-The local version (including unsaved changes) is copied to
-LOCAL-PATH.conflict-TIMESTAMP, LOCAL-PATH gets the host version
-REMOTE-CONTENT served with REMOTE-ETAG, a warning explains what
-happened and, if `org-social-vfile-conflict-ediff' is non-nil, `ediff'
-compares both files.  Return the conflict file name."
+The local version is copied to LOCAL-PATH.conflict-TIMESTAMP: it is
+LOCAL-CONTENT when non-nil, otherwise the buffer visiting LOCAL-PATH
+\(including unsaved changes) or the file itself.  LOCAL-PATH gets the
+host version REMOTE-CONTENT served with REMOTE-ETAG, a warning explains
+what happened and, if `org-social-vfile-conflict-ediff' is non-nil,
+`ediff' compares both files.  Return the conflict file name."
   (let* ((buf (find-buffer-visiting local-path))
-         (local (if buf
-                    (with-current-buffer buf
-                      (buffer-substring-no-properties (point-min) (point-max)))
-                  (org-social-file--read-local local-path)))
+         (local (cond
+                 (local-content)
+                 (buf (with-current-buffer buf
+                        (buffer-substring-no-properties (point-min) (point-max))))
+                 (t (org-social-file--read-local local-path))))
          (conflict-file (org-social-file--conflict-file-name local-path)))
     (org-social-file--write-local conflict-file (or local ""))
     (org-social-file--write-local local-path remote-content)
@@ -480,6 +520,7 @@ compares both files.  Return the conflict file name."
         (revert-buffer t t t)))
     (org-social-file--set-state local-path
                                 :status 'conflict :started nil :pending nil
+                                :inserted-ids nil
                                 :conflict-file conflict-file)
     (display-warning
      'org-social
@@ -497,11 +538,355 @@ Copy your changes into %s (ediff opens both files, your version is A) and save i
                    conflict-file local-path))
     conflict-file))
 
+(defun org-social-file--fetch-and-handle-conflict (local-path local-content)
+  "Download the feed and keep it and LOCAL-CONTENT as a conflict of LOCAL-PATH.
+LOCAL-CONTENT may be nil to use the local copy, see
+`org-social-file--handle-conflict'."
+  (org-social-file--fetch-remote
+   org-social-my-public-url
+   (lambda (remote)
+     (if (org-social-file--response-ok-p remote)
+         (org-social-file--handle-conflict local-path
+                                           (plist-get remote :body)
+                                           (plist-get remote :etag)
+                                           local-content)
+       (org-social-file--upload-failed
+        local-path
+        "your feed changed on the host and could not be downloaded to compare it"
+        (plist-get remote :status) (plist-get remote :body))))))
+
+;;;; Post IDs
+
+(defconst org-social-file--timestamp-regexp
+  (concat "[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}T[0-9]\\{2\\}:[0-9]\\{2\\}:[0-9]\\{2\\}"
+          "\\(?:Z\\|[+-][0-9]\\{2\\}:?[0-9]\\{2\\}\\)")
+  "Regexp matching a post ID (an RFC 3339 timestamp).")
+
+(defun org-social-file--post-ids (content)
+  "Return the post IDs found in CONTENT, in the header or in properties."
+  (let ((ids '())
+        (start 0)
+        (regexp (format "^\\(?:\\*\\*[ \t]+\\|:ID:[ \t]*\\)\\(%s\\)[ \t]*$"
+                        org-social-file--timestamp-regexp)))
+    (while (string-match regexp content start)
+      (push (match-string 1 content) ids)
+      (setq start (match-end 0)))
+    ids))
+
+(defun org-social-file--timestamp-add-second (timestamp)
+  "Return TIMESTAMP plus one second, keeping its time zone and format."
+  (let* ((time (parse-iso8601-time-string timestamp))
+         (utc (string-suffix-p "Z" timestamp))
+         (offset (if (string-match "\\([+-]\\)\\([0-9]\\{2\\}\\):?\\([0-9]\\{2\\}\\)\\'" timestamp)
+                     (* (if (equal (match-string 1 timestamp) "-") -1 1)
+                        (+ (* 3600 (string-to-number (match-string 2 timestamp)))
+                           (* 60 (string-to-number (match-string 3 timestamp)))))
+                   0))
+         (next (format-time-string "%FT%T%z" (time-add time 1) offset)))
+    (cond
+     (utc (concat (substring next 0 -5) "Z"))
+     ((string-match-p ":[0-9]\\{2\\}\\'" (substring timestamp -3))
+      (concat (substring next 0 -2) ":" (substring next -2)))
+     (t next))))
+
+(defun org-social-file--unique-timestamp (timestamp taken)
+  "Return TIMESTAMP, or the next free second if it is in the list TAKEN.
+Two posts of a feed cannot share an ID."
+  (let ((ts timestamp))
+    (while (member ts taken)
+      (setq ts (org-social-file--timestamp-add-second ts)))
+    ts))
+
+(defun org-social-file--new-timestamp ()
+  "Return a post ID for a new post in the current buffer.
+It is the current time, moved forward if a post already uses it.  When
+the buffer is the vfile local copy, the ID is remembered so that the
+post can be added again on top of the host version if saving it hits a
+conflict (see `org-social-file--package-blocks')."
+  (let ((id (org-social-file--unique-timestamp
+             (org-social-parser--generate-timestamp)
+             (org-social-file--post-ids
+              (buffer-substring-no-properties (point-min) (point-max))))))
+    (when (and buffer-file-name
+               (boundp 'org-social-file)
+               (org-social-file--is-vfile-p org-social-file)
+               (file-equal-p buffer-file-name
+                             (org-social-file--get-local-file-path org-social-file)))
+      (org-social-file--set-state
+       buffer-file-name :inserted-ids
+       (cons id (plist-get (org-social-file--state buffer-file-name) :inserted-ids))))
+    id))
+
+;;;; Package actions
+
+(defconst org-social-file--action-attempts 3
+  "Uploads tried by a package action before reporting a conflict.")
+
+(defconst org-social-file--action-retry-delays '(0.3 1.0)
+  "Seconds to wait before each new attempt of a package action.")
+
+(defun org-social-file--post-block-regexp (id)
+  "Return a regexp matching the header line of the post with ID."
+  (format "^\\*\\*[ \t]+%s[ \t]*$" (regexp-quote id)))
+
+(defun org-social-file--normalize (content)
+  "Return CONTENT without trailing spaces and repeated blank lines."
+  (let ((text (replace-regexp-in-string "[ \t]+$" "" content)))
+    (string-trim (replace-regexp-in-string "\n\\{3,\\}" "\n\n" text))))
+
+(defun org-social-file--extract-blocks (content ids)
+  "Split the posts with IDS out of CONTENT.
+Return a cons (REST . BLOCKS): CONTENT without those posts, and the
+text of each post found, in order of appearance."
+  (with-temp-buffer
+    (insert content)
+    (let ((ranges '()))
+      (dolist (id ids)
+        (goto-char (point-min))
+        (when (re-search-forward (org-social-file--post-block-regexp id) nil t)
+          (let ((start (line-beginning-position)))
+            (forward-line 1)
+            (push (cons start
+                        (if (re-search-forward "^\\*\\{1,2\\}\\(?:[ \t]\\|$\\)" nil t)
+                            (line-beginning-position)
+                          (point-max)))
+                  ranges))))
+      (setq ranges (sort ranges (lambda (a b) (< (car a) (car b)))))
+      (let ((blocks (mapcar (lambda (range)
+                              (string-trim-right
+                               (buffer-substring-no-properties (car range) (cdr range))))
+                            ranges)))
+        (dolist (range (reverse ranges))
+          (delete-region (car range) (cdr range)))
+        (cons (buffer-string) blocks)))))
+
+(defun org-social-file--package-blocks (local-path content)
+  "Return the posts added by the package if that is all CONTENT changes.
+CONTENT is the local version of LOCAL-PATH.  The posts are the ones inserted by
+`org-social-file--new-timestamp' (new posts, replies, reactions,
+boosts, polls, migrations), possibly with text written in them.
+Return nil if anything else differs from the version downloaded from
+the host, which means the file was edited by hand."
+  (let ((ids (plist-get (org-social-file--state local-path) :inserted-ids))
+        (base (plist-get (org-social-file--read-base local-path) :content)))
+    (when (and ids (stringp base))
+      (let ((split (org-social-file--extract-blocks content ids)))
+        (when (and (cdr split)
+                   (equal (org-social-file--normalize (car split))
+                          (org-social-file--normalize base)))
+          (cdr split))))))
+
+(defun org-social-file--append-to-posts (content block)
+  "Return CONTENT with the post BLOCK added at the end of its Posts section."
+  (let ((text (string-trim-right content)))
+    (unless (string-match-p "^\\* Posts[ \t]*$" text)
+      (setq text (concat text "\n\n* Posts")))
+    (concat text
+            (if (string-match-p "^\\* Posts[ \t]*\\'" text) "\n" "\n\n")
+            (string-trim-right block)
+            "\n")))
+
+(defun org-social-file--append-new-post (content make-block)
+  "Return CONTENT with a new post at the end.
+MAKE-BLOCK is called with a post ID that is the current time, moved
+forward if CONTENT already has a post with it, and returns the post."
+  (org-social-file--append-to-posts
+   content
+   (funcall make-block
+            (org-social-file--unique-timestamp
+             (org-social-parser--generate-timestamp)
+             (org-social-file--post-ids content)))))
+
+(defun org-social-file--append-blocks-transform (blocks)
+  "Return a function adding the posts BLOCKS to the feed it receives.
+Each post keeps its ID unless the feed already has a post with it, in
+which case the next free second is used."
+  (lambda (content)
+    (let ((taken (org-social-file--post-ids content))
+          (result content))
+      (dolist (block blocks)
+        (let* ((id-end (and (string-match (format "\\`\\*\\*[ \t]+\\(%s\\)"
+                                                  org-social-file--timestamp-regexp)
+                                          block)
+                            (match-end 1)))
+               (id (and id-end (match-string 1 block)))
+               (new-id (and id (org-social-file--unique-timestamp id taken))))
+          (when new-id
+            (push new-id taken)
+            (unless (equal id new-id)
+              (setq block (concat "** " new-id (substring block id-end)))))
+          (setq result (org-social-file--append-to-posts result block))))
+      result)))
+
+(defun org-social-file--store-uploaded (local-path content etag)
+  "Record that the host now has CONTENT, served with ETAG, for LOCAL-PATH.
+The local copy and the buffer visiting it are updated unless the
+buffer has unsaved changes."
+  (let ((buf (find-buffer-visiting local-path))
+        (uploaded-ids (org-social-file--post-ids content)))
+    (if (and buf (buffer-modified-p buf))
+        (unless (equal (org-social-file--read-local local-path) content)
+          (display-warning
+           'org-social
+           (format "%s was uploaded while it had unsaved changes.  Revert it (M-x revert-buffer) to see the uploaded version before saving again."
+                   (buffer-name buf))
+           :warning))
+      (unless (equal (org-social-file--read-local local-path) content)
+        (org-social-file--write-local local-path content)
+        (org-social-file--revert-visiting-buffer local-path t)))
+    (org-social-file--write-base local-path etag content)
+    (org-social-file--set-state
+     local-path :inserted-ids
+     (seq-remove (lambda (id) (member id uploaded-ids))
+                 (plist-get (org-social-file--state local-path) :inserted-ids)))))
+
+(defun org-social-file--keep-action-locally (local-path remote remote-etag new)
+  "Keep NEW in LOCAL-PATH so that it is uploaded later.
+REMOTE, served with REMOTE-ETAG, is the feed NEW was built on.  Skipped
+when the buffer visiting LOCAL-PATH has unsaved changes."
+  (let ((buf (find-buffer-visiting local-path)))
+    (unless (and buf (buffer-modified-p buf))
+      (org-social-file--write-base local-path remote-etag remote)
+      (org-social-file--write-local local-path new)
+      (org-social-file--revert-visiting-buffer local-path t))))
+
+(defun org-social-file--run-action (vfile-url local-path transform
+                                              &optional done attempt)
+  "Apply TRANSFORM to the feed on the host of VFILE-URL and upload it.
+TRANSFORM receives the feed content and returns the new content.  The
+upload sends If-Match; when the host answers 412 because the feed
+changed meanwhile, TRANSFORM runs again on the new feed, up to
+`org-social-file--action-attempts' uploads, waiting a little longer
+each time.  Then the conflict is handled by
+`org-social-file--handle-conflict'.  On success LOCAL-PATH gets the
+result and DONE, if non-nil, is called with it.  ATTEMPT is the number
+of this upload, 1 by default."
+  (let ((attempt (or attempt 1))
+        (public-url org-social-my-public-url))
+    (org-social-file--set-state local-path
+                                :status 'uploading :started (float-time))
+    (org-social-file--fetch-remote
+     public-url
+     (lambda (response)
+       (if (not (org-social-file--response-ok-p response))
+           (org-social-file--upload-failed
+            local-path "could not download your feed before changing it"
+            (plist-get response :status) (plist-get response :body))
+         (let* ((remote (plist-get response :body))
+                (remote-etag (plist-get response :etag))
+                (new (funcall transform remote)))
+           (if (equal new remote)
+               (progn
+                 (org-social-file--store-uploaded local-path remote remote-etag)
+                 (org-social-file--upload-succeeded local-path)
+                 (when done (funcall done remote)))
+             (org-social-file--post-content
+              vfile-url new remote-etag
+              (lambda (post)
+                (let ((status (plist-get post :status)))
+                  (cond
+                   ((and status (>= status 200) (< status 300))
+                    (org-social-file--store-uploaded local-path new (plist-get post :etag))
+                    (org-social-file--upload-succeeded local-path)
+                    (message "File uploaded successfully to host")
+                    (when done (funcall done new)))
+                   ((and (eql status 412)
+                         (< attempt org-social-file--action-attempts))
+                    (run-at-time (nth (1- attempt) org-social-file--action-retry-delays)
+                                 nil #'org-social-file--run-action
+                                 vfile-url local-path transform done (1+ attempt)))
+                   ((eql status 412)
+                    (org-social-file--fetch-and-handle-conflict local-path new))
+                   (t
+                    (org-social-file--keep-action-locally local-path remote remote-etag new)
+                    (org-social-file--report-post-failure local-path status
+                                                          (plist-get post :body))))))))))))))
+
+(defun org-social-file--report-post-failure (local-path status body)
+  "Report the failed upload of LOCAL-PATH with HTTP STATUS and BODY."
+  (cond
+   ((eql status 401)
+    (org-social-file--upload-failed
+     local-path
+     "the vfile URL is invalid or incomplete, copy it again from your other client"
+     status body))
+   (status
+    (org-social-file--upload-failed local-path "the host rejected the upload"
+                                    status body))
+   (t
+    (org-social-file--upload-failed local-path "the host could not be reached"))))
+
+(defun org-social-file--start-action (vfile-url local-path transform done)
+  "Run `org-social-file--run-action' once no other upload is running.
+VFILE-URL, LOCAL-PATH, TRANSFORM and DONE are passed to it."
+  (if (org-social-file--upload-running-p local-path)
+      (run-at-time 0.5 nil #'org-social-file--start-action
+                   vfile-url local-path transform done)
+    (org-social-file--run-action vfile-url local-path transform done)))
+
+(defun org-social-file--apply-action (transform &optional done)
+  "Change your feed with TRANSFORM, without losing posts published elsewhere.
+TRANSFORM is a function that receives the content of the feed and
+returns the new content; it must only add or change what the action
+needs (a post, a FOLLOW line...).  With a vfile, it runs on the latest
+version downloaded from the host and the result is uploaded
+asynchronously, retrying on conflicts (see
+`org-social-file--run-action').  With a local file, the file is changed
+and saved.  DONE, if non-nil, is called with the new content.
+Signal a `user-error', changing nothing, if the buffer visiting the
+feed has unsaved changes: they are not mixed with the action."
+  (org-social-file--check-config)
+  (let* ((vfile (org-social-file--is-vfile-p org-social-file))
+         (local-path (if vfile
+                         (org-social-file--get-local-file-path org-social-file)
+                       (expand-file-name org-social-file)))
+         (buf (find-buffer-visiting local-path)))
+    (when (and buf (buffer-modified-p buf))
+      (user-error "%s has unsaved changes: save or revert it first, nothing was changed"
+                  (buffer-name buf)))
+    (if vfile
+        (org-social-file--start-action org-social-file local-path transform done)
+      (unless (file-exists-p local-path)
+        (user-error "File %s does not exist" local-path))
+      (with-current-buffer (find-file-noselect local-path)
+        (let* ((old (buffer-substring-no-properties (point-min) (point-max)))
+               (new (funcall transform old)))
+          (unless (equal old new)
+            (erase-buffer)
+            (insert new)
+            (save-buffer)
+            (unless (memq #'org-social-file--auto-save after-save-hook)
+              (org-social-file--auto-save)))
+          (when done (funcall done new)))))))
+
+(defun org-social-file--rebase-or-conflict (vfile-url local-path content attempt)
+  "Handle a conflict while uploading CONTENT, the local copy LOCAL-PATH.
+If CONTENT only adds posts created by the package to the version
+downloaded from the host, add them again on top of the host version
+of VFILE-URL with `org-social-file--run-action' (ATTEMPT is its first upload
+number).  Otherwise the file was edited by hand: keep both versions
+with `org-social-file--handle-conflict'."
+  (let ((blocks (org-social-file--package-blocks local-path content)))
+    (cond
+     ((not blocks)
+      (org-social-file--fetch-and-handle-conflict local-path nil))
+     ((> attempt org-social-file--action-attempts)
+      (org-social-file--fetch-and-handle-conflict local-path content))
+     ((> attempt 1)
+      ;; The previous upload was refused: wait a little before retrying
+      (run-at-time (nth (- attempt 2) org-social-file--action-retry-delays)
+                   nil #'org-social-file--run-action vfile-url local-path
+                   (org-social-file--append-blocks-transform blocks) nil attempt))
+     (t
+      (org-social-file--run-action vfile-url local-path
+                                   (org-social-file--append-blocks-transform blocks)
+                                   nil attempt)))))
+
 (defun org-social-file--upload-after-check (vfile-url local-path response)
   "Upload LOCAL-PATH to VFILE-URL if the feed in RESPONSE allows it.
 RESPONSE is the feed just downloaded from the host.  Upload only if it
-is still the version LOCAL-PATH is based on; otherwise keep both
-versions with `org-social-file--handle-conflict'."
+is still the version LOCAL-PATH is based on; otherwise see
+`org-social-file--rebase-or-conflict'."
   (if (not (org-social-file--response-ok-p response))
       (org-social-file--upload-failed
        local-path
@@ -510,13 +895,13 @@ versions with `org-social-file--handle-conflict'."
     (let* ((remote (plist-get response :body))
            (remote-etag (plist-get response :etag))
            (remote-sha (org-social-file--sha256 remote))
-           (local-sha (org-social-file--sha256
-                       (or (org-social-file--read-local local-path) "")))
+           (local (or (org-social-file--read-local local-path) ""))
+           (local-sha (org-social-file--sha256 local))
            (base-sha (plist-get (org-social-file--read-base local-path) :sha256)))
       (cond
        ;; The host already has this content.
        ((equal local-sha remote-sha)
-        (org-social-file--write-base local-path remote-etag remote)
+        (org-social-file--store-uploaded local-path remote remote-etag)
         (org-social-file--upload-succeeded local-path))
        ;; No local changes, only remote ones: take them.
        ((equal local-sha base-sha)
@@ -526,15 +911,15 @@ versions with `org-social-file--handle-conflict'."
        ((equal remote-sha base-sha)
         (org-social-file--post-vfile vfile-url local-path remote-etag))
        (t
-        (org-social-file--handle-conflict local-path remote remote-etag))))))
+        (org-social-file--rebase-or-conflict vfile-url local-path local 1))))))
 
-(defun org-social-file--post-vfile (vfile-url local-path etag)
-  "POST LOCAL-PATH to the upload endpoint of the host of VFILE-URL.
+(defun org-social-file--post-content (vfile-url content etag callback)
+  "POST CONTENT as the feed of VFILE-URL to the upload endpoint of its host.
 When ETAG is non-nil it is sent as If-Match, so the host refuses the
-upload with 412 if the feed changed in the meantime."
-  (let* ((content (or (org-social-file--read-local local-path) ""))
-         (public-url org-social-my-public-url)
-         (host-url (org-social-file--extract-host-from-vfile vfile-url))
+upload with 412 if the feed changed in the meantime.  CALLBACK receives
+the plist of `org-social-file--parse-response', or nil if the host could
+not be reached."
+  (let* ((host-url (org-social-file--extract-host-from-vfile vfile-url))
          (upload-url (concat host-url "/upload"))
          (boundary (format "----EmacsFormBoundary%d" (random 1000000)))
          (body (concat
@@ -547,48 +932,41 @@ upload with 412 if the feed changed in the meantime."
                 content "\r\n"
                 "--" boundary "--\r\n"))
          (url-request-method "POST")
+         ;; Never prompt for a user and password when the host answers 401
+         (url-request-noninteractive t)
          (url-request-extra-headers
           `(("Content-Type" . ,(format "multipart/form-data; boundary=%s" boundary))
             ,@(when etag `(("If-Match" . ,etag)))))
          (url-request-data (encode-coding-string body 'utf-8-unix)))
     (message "Uploading file to %s..." host-url)
-    (url-retrieve
+    (org-social-file--url-retrieve
      upload-url
      (lambda (_status)
-       (let* ((response (condition-case nil
-                            (org-social-file--parse-response)
-                          (error nil)))
-              (http-status (plist-get response :status))
-              (response-body (plist-get response :body)))
+       (let ((response (condition-case nil
+                           (org-social-file--parse-response)
+                         (error nil))))
          (kill-buffer (current-buffer))
+         (funcall callback (and (plist-get response :status) response)))))))
+
+(defun org-social-file--post-vfile (vfile-url local-path etag)
+  "Upload the local copy LOCAL-PATH to the host of VFILE-URL.
+ETAG is sent as If-Match when non-nil (see
+`org-social-file--post-content')."
+  (let ((content (or (org-social-file--read-local local-path) "")))
+    (org-social-file--post-content
+     vfile-url content etag
+     (lambda (response)
+       (let ((status (plist-get response :status)))
          (cond
-          ((and http-status (>= http-status 200) (< http-status 300))
-           (org-social-file--write-base local-path (plist-get response :etag) content)
+          ((and status (>= status 200) (< status 300))
+           (org-social-file--store-uploaded local-path content (plist-get response :etag))
            (org-social-file--upload-succeeded local-path)
            (message "File uploaded successfully to host"))
-          ((eql http-status 412)
-           (org-social-file--fetch-remote
-            public-url
-            (lambda (remote)
-              (if (org-social-file--response-ok-p remote)
-                  (org-social-file--handle-conflict local-path
-                                                    (plist-get remote :body)
-                                                    (plist-get remote :etag))
-                (org-social-file--upload-failed
-                 local-path
-                 "your feed changed on the host and could not be downloaded to compare it"
-                 412 response-body)))))
-          ((eql http-status 401)
-           (org-social-file--upload-failed
-            local-path
-            "the vfile URL is invalid or incomplete, copy it again from your other client"
-            http-status response-body))
-          (http-status
-           (org-social-file--upload-failed local-path "the host rejected the upload"
-                                           http-status response-body))
+          ((eql status 412)
+           (org-social-file--rebase-or-conflict vfile-url local-path content 2))
           (t
-           (org-social-file--upload-failed local-path "the host could not be reached")))))
-     nil t)))
+           (org-social-file--report-post-failure local-path status
+                                                 (plist-get response :body)))))))))
 
 (defun org-social-file--upload-vfile (vfile-url local-path &optional force)
   "Upload LOCAL-PATH to VFILE-URL without overwriting changes made elsewhere.
@@ -783,7 +1161,7 @@ If GROUP-CONTEXT is provided, add GROUP property to the post.
 If VISIBILITY is \"mention\", add VISIBILITY property to the post.
 EXTRA-PROPERTIES is an optional alist of additional properties to insert,
 e.g. \\='((\"BOT\" . \"chess 1.e4 e5\"))."
-  (let ((timestamp (org-social-parser--generate-timestamp))
+  (let ((timestamp (org-social-file--new-timestamp))
         (lang-value (if (and (boundp 'org-social-default-lang)
                              org-social-default-lang
                              (not (string-empty-p org-social-default-lang)))
@@ -835,7 +1213,7 @@ e.g. \\='((\"BOT\" . \"chess 1.e4 e5\"))."
   "Insert a new poll template at the current position.
 QUESTION is the poll question, OPTIONS is a list of poll options,
 and POLL-END is the RFC 3339 formatted end time."
-  (let ((timestamp (org-social-parser--generate-timestamp))
+  (let ((timestamp (org-social-file--new-timestamp))
         (lang-value (if (and (boundp 'org-social-default-lang)
                              org-social-default-lang
                              (not (string-empty-p org-social-default-lang)))
@@ -1103,7 +1481,7 @@ EMOJI is the reaction emoji to add."
 REPLY-URL is the URL of the post being reacted to.
 REPLY-ID is the timestamp ID of the post being reacted to.
 EMOJI is the reaction emoji."
-  (let ((timestamp (org-social-parser--generate-timestamp)))
+  (let ((timestamp (org-social-file--new-timestamp)))
     ;; Check if we need to add newlines before **
     ;; Logic:
     ;; - First post after "* Posts": no blank line
@@ -1159,7 +1537,7 @@ Optional COMMENT is a text comment to add to the boost."
 POST-URL is the URL of the post being boosted.
 POST-ID is the timestamp ID of the post being boosted.
 Optional COMMENT is a text comment to add to the boost."
-  (let ((timestamp (org-social-parser--generate-timestamp)))
+  (let ((timestamp (org-social-file--new-timestamp)))
     ;; Check if we need to add newlines before **
     ;; Logic:
     ;; - First post after "* Posts": no blank line
@@ -1482,7 +1860,7 @@ Interactively prompts for the old URL and new URL."
   "Insert a migration template at the current position.
 OLD-URL is the old account URL.
 NEW-URL is the new account URL."
-  (let ((timestamp (org-social-parser--generate-timestamp)))
+  (let ((timestamp (org-social-file--new-timestamp)))
     ;; Check if we need to add newlines before **
     ;; Logic:
     ;; - First post after "* Posts": no blank line
@@ -1621,16 +1999,19 @@ Updates our local social.org file if a migration is found."
           (new-url (alist-get 'new-url migration)))
       ;; Only process if the old URL matches the feed URL we're downloading
       (when (and old-url new-url (string= old-url feed-url))
-        (let ((target-file (if (org-social-file--is-vfile-p org-social-file)
-                               (org-social-file--get-local-file-path org-social-file)
-                             org-social-file)))
-          (when (file-exists-p target-file)
-            (with-current-buffer (find-file-noselect target-file)
-              (let ((count (org-social-file--apply-migration old-url new-url)))
-                (when (> count 0)
-                  (save-buffer)
-                  (message "Remote migration detected: %s → %s (%d updates)"
-                           old-url new-url count))))))))))
+        (condition-case err
+            (org-social-file--apply-action
+             (lambda (content)
+               (with-temp-buffer
+                 (insert content)
+                 (if (> (org-social-file--apply-migration old-url new-url) 0)
+                     (buffer-string)
+                   content)))
+             (lambda (_content)
+               (message "Remote migration detected: %s → %s" old-url new-url)))
+          (user-error
+           (message "Remote migration %s → %s not applied: %s"
+                    old-url new-url (error-message-string err))))))))
 
 (defun org-social-file--check-and-apply-remote-migrations (feeds-data)
   "Check for migrations in FEEDS-DATA and apply them to our social.org.

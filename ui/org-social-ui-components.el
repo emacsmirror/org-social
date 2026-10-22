@@ -2,7 +2,7 @@
 
 ;; SPDX-License-Identifier: GPL-3.0
 ;; Author: Andros Fenollosa <hi@andros.dev>
-;; Version: 2.16
+;; Version: 2.17
 ;; URL: https://git.andros.dev/org-social/org-social.el
 
 ;;; Commentary:
@@ -25,8 +25,8 @@
 (declare-function org-social-file--new-post "org-social-file" (&optional reply-url reply-id))
 (declare-function org-social-file--new-poll "org-social-file" ())
 (declare-function org-social-file--edit-post "org-social-file" (timestamp))
-(declare-function org-social-file--ensure-open-and-fresh "org-social-file" ())
-(declare-function org-social-file--save-and-sync "org-social-file" ())
+(declare-function org-social-file--apply-action "org-social-file" (transform &optional done))
+(declare-function org-social-file--append-new-post "org-social-file" (content make-block))
 (declare-function org-social-ui-timeline "org-social-ui-timeline" ())
 (declare-function org-social-ui-notifications "org-social-ui-notifications" ())
 (declare-function org-social-ui-groups "org-social-ui-groups" ())
@@ -112,36 +112,22 @@ and opens it with `org-social-live-preview-url' base URL."
 (defun org-social-ui--create-poll-vote (author-url timestamp poll-option)
   "Create a minimal vote post for a poll.
 AUTHOR-URL and TIMESTAMP identify the poll.
-POLL-OPTION is the selected option."
+POLL-OPTION is the selected option.  The vote is added to the latest
+version of the feed, so posts published from other clients are kept."
   (require 'org-social-file)
-  (require 'org-social-parser)
-  ;; Download the feed first so posts published elsewhere are kept
-  (org-social-file--ensure-open-and-fresh)
-  (let ((target-file (buffer-file-name)))
-    ;; Find posts section
-    (goto-char (point-min))
-    (unless (re-search-forward "^\\* Posts" nil t)
-      (user-error "No '* Posts' section found in %s" target-file))
-    ;; Go to end of buffer to insert new post
-    (goto-char (point-max))
-    ;; Insert minimal vote template
-    (let ((vote-timestamp (org-social-parser--generate-timestamp)))
-      (insert "\n** \n:PROPERTIES:\n")
-      (insert (format ":ID: %s\n" vote-timestamp))
-      (insert ":CLIENT: org-social.el\n")
-      (insert (format ":REPLY_TO: %s#%s\n" author-url timestamp))
-      (insert (format ":POLL_OPTION: %s\n" poll-option))
-      (insert ":END:\n\n")
-      ;; Save, and upload to the vfile host if using vfile
-      (org-social-file--save-and-sync)
-      (message "Vote created for option: %s" poll-option))
-    ;; Move cursor to end and recenter
-    (goto-char (point-max))
-    (recenter -3)
-    ;; Validate file after adding vote
-    (when (fboundp 'org-social-validator-validate-and-display)
-      (require 'org-social-validator)
-      (org-social-validator-validate-and-display))))
+  (message "Voting for option: %s..." poll-option)
+  (org-social-file--apply-action
+   (lambda (content)
+     (org-social-file--append-new-post
+      content
+      (lambda (id)
+        (concat (format "** %s\n:PROPERTIES:\n" id)
+                ":CLIENT: org-social.el\n"
+                (format ":REPLY_TO: %s#%s\n" author-url timestamp)
+                (format ":POLL_OPTION: %s\n" poll-option)
+                ":END:\n"))))
+   (lambda (_content)
+     (message "Vote created for option: %s" poll-option))))
 
 (defun org-social-ui--render-poll-content (text poll-end author-url timestamp _is-my-post)
   "Render poll content with interactive radio buttons.

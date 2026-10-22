@@ -2,7 +2,7 @@
 
 ;; SPDX-License-Identifier: GPL-3.0
 ;; Author: Andros Fenollosa <hi@andros.dev>
-;; Version: 2.16
+;; Version: 2.17
 ;; URL: https://git.andros.dev/org-social/org-social.el
 
 ;;; Commentary:
@@ -20,9 +20,7 @@
 
 ;; Forward declarations
 (declare-function org-social-relay--fetch-feeds "org-social-relay" (callback))
-(declare-function org-social-file--is-vfile-p "org-social-file" (file-path))
-(declare-function org-social-file--refresh-vfile-cache "org-social-file" ())
-(declare-function org-social-file--save-and-sync "org-social-file" ())
+(declare-function org-social-file--apply-action "org-social-file" (transform &optional done))
 (declare-function org-social-parser--get-my-profile "org-social-parser" ())
 (declare-function org-social-parser--get-value "org-social-parser" (feed property))
 (declare-function org-social-ui-timeline "org-social-ui-timeline" ())
@@ -105,66 +103,41 @@
                   (string= (alist-get 'url follow) feed-url))
                 follows))))
 
+(defun org-social-ui--after-follow-change (message-text)
+  "Reload the profile, refresh the discover view and show MESSAGE-TEXT."
+  (setq org-social-variables--my-profile (org-social-parser--get-my-profile))
+  (when (get-buffer org-social-ui--discover-buffer-name)
+    (save-window-excursion
+      (org-social-ui-discover)))
+  (message "%s" message-text))
+
 (defun org-social-ui--follow-user (feed-url nick)
-  "Add FEED-URL with NICK to follows in social.org."
-  (let ((target-file (if (and (fboundp 'org-social-file--is-vfile-p)
-                              (org-social-file--is-vfile-p org-social-file)
-                              (fboundp 'org-social-file--get-local-file-path))
-                         (org-social-file--get-local-file-path org-social-file)
-                       org-social-file)))
-    ;; Download the feed first so posts published elsewhere are kept
-    (when (org-social-file--is-vfile-p org-social-file)
-      (org-social-file--refresh-vfile-cache))
-    (when (file-exists-p target-file)
-      (with-current-buffer (find-file-noselect target-file)
-	(save-excursion
-          (goto-char (point-min))
-          ;; Find the end of the header metadata (before * Posts)
-          (if (re-search-forward "^\\* Posts" nil t)
-              (progn
-		(beginning-of-line)
-		(insert (format "#+FOLLOW: %s %s\n" nick feed-url))
-		;; Save, and upload to the host if vfile
-		(org-social-file--save-and-sync)
-		(message "Now following %s" nick))
-            ;; If no Posts section, add at the end of file
-            (goto-char (point-max))
-            (unless (bolp) (insert "\n"))
-            (insert (format "#+FOLLOW: %s %s\n" nick feed-url))
-            ;; Save, and upload to the host if vfile
-	    (org-social-file--save-and-sync)
-            (message "Now following %s" nick)))
-        ;; Reload profile
-        (setq org-social-variables--my-profile (org-social-parser--get-my-profile))
-        ;; Refresh discover view
-        (org-social-ui-discover)))))
+  "Add FEED-URL with NICK to follows in social.org.
+The change is applied to the latest version of the feed, so posts
+published from other clients are kept."
+  (org-social-file--apply-action
+   (lambda (content)
+     (if (string-match-p (format "^#\\+FOLLOW:.*%s" (regexp-quote feed-url)) content)
+         content
+       (let ((line (format "#+FOLLOW: %s %s\n" nick feed-url)))
+         (if (string-match "^\\* Posts" content)
+             (concat (substring content 0 (match-beginning 0))
+                     line
+                     (substring content (match-beginning 0)))
+           (concat content (if (string-suffix-p "\n" content) "" "\n") line)))))
+   (lambda (_content)
+     (org-social-ui--after-follow-change (format "Now following %s" nick)))))
 
 (defun org-social-ui--unfollow-user (feed-url nick)
   "Remove FEED-URL from follows in social.org.
-NICK is the user's nickname."
-  (let ((target-file (if (and (fboundp 'org-social-file--is-vfile-p)
-                              (org-social-file--is-vfile-p org-social-file)
-                              (fboundp 'org-social-file--get-local-file-path))
-                         (org-social-file--get-local-file-path org-social-file)
-                       org-social-file)))
-    ;; Download the feed first so posts published elsewhere are kept
-    (when (org-social-file--is-vfile-p org-social-file)
-      (org-social-file--refresh-vfile-cache))
-    (when (file-exists-p target-file)
-      (with-current-buffer (find-file-noselect target-file)
-	(save-excursion
-          (goto-char (point-min))
-          ;; Search for the FOLLOW line with this URL
-          (when (re-search-forward (format "^#\\+FOLLOW:.*%s" (regexp-quote feed-url)) nil t)
-            (beginning-of-line)
-            (kill-line 1)
-            ;; Save, and upload to the host if vfile
-	    (org-social-file--save-and-sync)
-            (message "Unfollowed %s" nick)))
-        ;; Reload profile
-        (setq org-social-variables--my-profile (org-social-parser--get-my-profile))
-        ;; Refresh discover view
-        (org-social-ui-discover)))))
+NICK is the user's nickname.  The change is applied to the latest
+version of the feed, so posts published from other clients are kept."
+  (org-social-file--apply-action
+   (lambda (content)
+     (replace-regexp-in-string
+      (format "^#\\+FOLLOW:.*%s.*\n?" (regexp-quote feed-url)) "" content t t))
+   (lambda (_content)
+     (org-social-ui--after-follow-change (format "Unfollowed %s" nick)))))
 
 (defun org-social-ui--insert-discover-user (user)
   "Insert a user component for USER in discover view."

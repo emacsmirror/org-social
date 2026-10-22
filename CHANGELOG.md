@@ -1,5 +1,16 @@
 # 📝 Changelog
 
+## 2.17
+
+- **Automatic retry on conflicts for package actions** (same behavior as client-core on Android, iOS and the TUI):
+  - Actions that only add or change one block of the feed are written as a function from the feed content to the new content. When the upload is refused because the feed changed on the host (412, or a different ETag), the feed is downloaded again, the action is applied to the new version and uploaded with the new `If-Match`. Up to 3 uploads, waiting 0.3 s and then 1 s; only then the usual conflict flow (`.conflict-*`, host version in `v-social.org`, `ediff`, warning) starts.
+  - Voting in a poll, following and unfollowing from Discover and remote migrations are applied directly to the latest feed and uploaded, without opening `v-social.org`. If `v-social.org` has unsaved changes they are refused with a message, so manual edits are never mixed with an action; if it is open without changes it is refreshed with the result.
+  - Posts, replies, reactions, boosts, polls and migrations created by the package are remembered. If saving them hits a conflict and they are the only change compared with the version downloaded from the host, they are added again on top of the new version. A post ID already used by a post that arrived meanwhile moves to the next free second, so two posts never share an ID.
+  - Any other change made by hand in `v-social.org` keeps going straight to `ediff`, without retries.
+  - `v-social.org.etag` now also keeps the content last downloaded from the host, to tell package changes from manual edits.
+- **Bug Fixes**:
+  - A 401 from the host (invalid vfile) no longer makes Emacs ask for a user and password. Without a prompt, url.el stored empty credentials and sent them in every later request to the host, which then failed (the host answered 500 to them, fixed on the host too). Requests of the package now get the 401 directly and show the "vfile URL is invalid or incomplete" warning.
+
 ## 2.16
 
 - **Bug Fixes**:

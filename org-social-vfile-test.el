@@ -22,6 +22,7 @@
 (require 'org-social-accounts)
 (require 'org-social-file)
 (require 'org-social-ui-components)
+(require 'org-social-ui-discover)
 
 (defconst org-social-vfile-test--vfile
   (concat "https://host.example/vfile?token=" (make-string 64 ?a)
@@ -44,7 +45,11 @@
   "Non-nil if the simulated host honors If-Match on upload.")
 
 (defvar org-social-vfile-test--upload-reply nil
-  "When non-nil, a function returning a raw response for any upload.")
+  "When non-nil, a function returning a raw response for an upload.
+If it returns nil, the upload is handled normally.")
+
+(defvar org-social-vfile-test--retry-delays nil
+  "Delays requested before retrying a package action, most recent first.")
 
 (defvar org-social-vfile-test--requests nil
   "Requests received by the simulated host, most recent first.
@@ -76,7 +81,8 @@ Each one is a plist (:method :url :headers :data).")
   "Answer the request to URL as the simulated host, using url.el variables."
   (let ((method (or url-request-method "GET"))
         (headers url-request-extra-headers))
-    (push (list :method method :url url :headers headers :data url-request-data)
+    (push (list :method method :url url :headers headers :data url-request-data
+                :noninteractive url-request-noninteractive)
           org-social-vfile-test--requests)
     (cond
      ((and (equal method "GET")
@@ -87,8 +93,8 @@ Each one is a plist (:method :url :headers :data).")
      ((and (equal method "POST") (equal url "https://host.example/upload"))
       (let ((if-match (cdr (assoc "If-Match" headers))))
         (cond
-         (org-social-vfile-test--upload-reply
-          (funcall org-social-vfile-test--upload-reply))
+         ((and org-social-vfile-test--upload-reply
+               (funcall org-social-vfile-test--upload-reply)))
          ((and org-social-vfile-test--if-match-support
                if-match
                (not (equal if-match (org-social-vfile-test--etag
@@ -138,6 +144,7 @@ Each one is a plist (:method :url :headers :data).")
           (org-social-vfile-test--requests nil)
           (org-social-vfile-test--warnings nil)
           (org-social-vfile-test--ediffs nil)
+          (org-social-vfile-test--retry-delays nil)
           (org-social-file--upload-state (make-hash-table :test #'equal))
           (original-run-at-time (symbol-function 'run-at-time)))
      (cl-letf (((symbol-function 'url-retrieve) #'org-social-vfile-test--url-retrieve)
@@ -148,9 +155,15 @@ Each one is a plist (:method :url :headers :data).")
                   (push (list type message level) org-social-vfile-test--warnings)))
                ((symbol-function 'run-at-time)
                 (lambda (time repeat function &rest args)
-                  (if (eq function #'org-social-file--open-conflict-ediff)
-                      (push args org-social-vfile-test--ediffs)
-                    (apply original-run-at-time time repeat function args))))
+                  (cond
+                   ((eq function #'org-social-file--open-conflict-ediff)
+                    (push args org-social-vfile-test--ediffs))
+                   ;; Retry at once instead of waiting
+                   ((memq function '(org-social-file--run-action
+                                     org-social-file--start-action))
+                    (push time org-social-vfile-test--retry-delays)
+                    (apply function args))
+                   (t (apply original-run-at-time time repeat function args)))))
                ((symbol-function 'org-social-validator-validate-and-display) #'ignore)
                ((symbol-function 'recenter) #'ignore))
        (unwind-protect
@@ -330,6 +343,8 @@ Each one is a plist (:method :url :headers :data).")
        (should (string-match-p "the vfile URL is invalid or incomplete, copy it again from your other client"
                                (nth 1 warning)))
        (should (string-match-p "Invalid vfile signature" (nth 1 warning))))
+     ;; url.el must not prompt for a user and password on 401
+     (should (plist-get (car (org-social-vfile-test--requests-with "POST")) :noninteractive))
      (should (eq (plist-get (org-social-file--state local-path) :status) 'failed))
      (should (equal org-social-vfile-test--remote org-social-vfile-test--feed))
      ;; The mode line flags the failure
@@ -371,6 +386,16 @@ Each one is a plist (:method :url :headers :data).")
      (should (equal org-social-vfile-test--remote edited))
      (should-not (assoc "If-Match" (plist-get (car (org-social-vfile-test--requests-with "POST"))
                                               :headers))))))
+
+(ert-deftest org-social-vfile-test-401-skips-url-auth ()
+  "The package requests never ask url.el for credentials."
+  (with-temp-buffer
+    (setq org-social-file--skip-http-auth t)
+    (should (eq (org-social-file--skip-http-auth (lambda (&rest _) (error "Prompted")) nil)
+                t)))
+  (with-temp-buffer
+    (should (eq (org-social-file--skip-http-auth (lambda (&rest _) 'asked) nil)
+                'asked))))
 
 ;;; vfile URL validation
 
@@ -534,6 +559,212 @@ Each one is a plist (:method :url :headers :data).")
      (should (string-match-p "Unsaved draft"
                              (org-social-vfile-test--read
                               (car (org-social-vfile-test--conflict-files))))))))
+
+;;; Package actions retry on conflicts
+
+(defun org-social-vfile-test--412-once (new-remote)
+  "Return an upload reply answering 412 once, after setting NEW-REMOTE.
+Later uploads are handled normally."
+  (let ((done nil))
+    (lambda ()
+      (unless done
+        (setq done t
+              org-social-vfile-test--remote new-remote)
+        (org-social-vfile-test--http 412 nil "{\"errors\": [\"Precondition Failed\"]}")))))
+
+(defun org-social-vfile-test--412-always ()
+  "Return an upload reply that always answers 412."
+  (lambda ()
+    (org-social-vfile-test--http 412 nil "{\"errors\": [\"Precondition Failed\"]}")))
+
+(defun org-social-vfile-test--count-ids (content id)
+  "Count the posts of CONTENT whose ID is ID."
+  (seq-count (lambda (x) (equal x id)) (org-social-file--post-ids content)))
+
+(ert-deftest org-social-vfile-test-timestamp-add-second ()
+  "IDs move forward one second, keeping their time zone format."
+  (should (equal (org-social-file--timestamp-add-second "2025-05-01T10:00:59+01:00")
+                 "2025-05-01T10:01:00+01:00"))
+  (should (equal (org-social-file--timestamp-add-second "2025-05-01T23:59:59+0100")
+                 "2025-05-02T00:00:00+0100"))
+  (should (equal (org-social-file--timestamp-add-second "2025-05-01T10:00:00-05:30")
+                 "2025-05-01T10:00:01-05:30"))
+  (should (equal (org-social-file--timestamp-add-second "2025-05-01T10:00:00Z")
+                 "2025-05-01T10:00:01Z"))
+  (should (equal (org-social-file--unique-timestamp
+                  "2025-05-01T10:00:00+01:00"
+                  '("2025-05-01T10:00:00+01:00" "2025-05-01T10:00:01+01:00"))
+                 "2025-05-01T10:00:02+01:00")))
+
+(ert-deftest org-social-vfile-test-reaction-retries-after-412 ()
+  "A reaction whose upload gets 412 is added again on top of the new feed."
+  (org-social-vfile-test--with-host
+   (org-social-file--refresh-vfile-cache)
+   (let ((android (concat org-social-vfile-test--feed org-social-vfile-test--android-post)))
+     (org-social-file--new-reaction "https://alice.example/social.org"
+                                    "2025-05-01T09:00:00+0100" "👍")
+     (setq org-social-vfile-test--upload-reply (org-social-vfile-test--412-once android))
+     (save-buffer)
+     (should (= (length (org-social-vfile-test--requests-with "POST")) 2))
+     (should (string-match-p "Post from Android" org-social-vfile-test--remote))
+     (should (string-match-p ":MOOD: 👍" org-social-vfile-test--remote))
+     (should (string-match-p "First post from Emacs" org-social-vfile-test--remote))
+     ;; The second upload used the ETag of the new feed
+     (should (equal (cdr (assoc "If-Match" (plist-get (car (last (org-social-vfile-test--requests-with "POST")))
+                                                      :headers)))
+                    (org-social-vfile-test--etag android)))
+     (should (equal org-social-vfile-test--retry-delays '(0.3)))
+     (should-not org-social-vfile-test--ediffs)
+     (should-not org-social-vfile-test--warnings)
+     (should-not (org-social-vfile-test--conflict-files))
+     ;; The buffer shows what was uploaded
+     (should (equal (buffer-string) org-social-vfile-test--remote))
+     (should-not (buffer-modified-p)))))
+
+(ert-deftest org-social-vfile-test-vote-retries-after-412 ()
+  "A vote whose upload gets 412 is applied again on the new feed."
+  (org-social-vfile-test--with-host
+   (org-social-file--refresh-vfile-cache)
+   (let ((android (concat org-social-vfile-test--feed org-social-vfile-test--android-post))
+         (done nil))
+     (setq org-social-vfile-test--upload-reply (org-social-vfile-test--412-once android))
+     (org-social-file--apply-action
+      (lambda (content)
+        (org-social-file--append-new-post
+         content (lambda (id) (format "** %s\n:PROPERTIES:\n:POLL_OPTION: Yes\n:END:\n" id))))
+      (lambda (content) (setq done content)))
+     (should (= (length (org-social-vfile-test--requests-with "POST")) 2))
+     (should (equal org-social-vfile-test--retry-delays '(0.3)))
+     (should (string-prefix-p (string-trim-right android) org-social-vfile-test--remote))
+     (should (string-match-p ":POLL_OPTION: Yes" org-social-vfile-test--remote))
+     (should (equal done org-social-vfile-test--remote))
+     (should (equal (org-social-vfile-test--read (org-social-vfile-test--local))
+                    org-social-vfile-test--remote))
+     (should-not org-social-vfile-test--ediffs))))
+
+(ert-deftest org-social-vfile-test-new-post-same-second-gets-new-id ()
+  "A post published elsewhere in the same second does not share our ID."
+  (org-social-vfile-test--with-host
+   (org-social-file--refresh-vfile-cache)
+   (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "public")))
+     (org-social-file--new-post))
+   (insert "My post from Emacs")
+   (let* ((id (car (plist-get (org-social-file--state (org-social-vfile-test--local))
+                              :inserted-ids)))
+          (other (format "\n** %s\n:PROPERTIES:\n:CLIENT: android\n:END:\n\nSame second on Android\n"
+                         id)))
+     (should id)
+     ;; Another client publishes with the same ID before we save
+     (setq org-social-vfile-test--remote (concat org-social-vfile-test--feed other))
+     (save-buffer)
+     (let ((remote org-social-vfile-test--remote))
+       (should (string-match-p "Same second on Android" remote))
+       (should (string-match-p "My post from Emacs" remote))
+       (should (= (org-social-vfile-test--count-ids remote id) 1))
+       (should (= (org-social-vfile-test--count-ids
+                   remote (org-social-file--timestamp-add-second id))
+                  1))
+       (should (= (length (org-social-file--post-ids remote))
+                  (length (delete-dups (org-social-file--post-ids remote))))))
+     (should-not org-social-vfile-test--ediffs)
+     (should-not (org-social-vfile-test--conflict-files)))))
+
+(ert-deftest org-social-vfile-test-three-412-is-a-conflict ()
+  "After three refused uploads, the action ends in the conflict flow."
+  (org-social-vfile-test--with-host
+   (org-social-file--refresh-vfile-cache)
+   (org-social-file--new-reaction "https://alice.example/social.org"
+                                  "2025-05-01T09:00:00+0100" "👍")
+   (setq org-social-vfile-test--upload-reply (org-social-vfile-test--412-always))
+   (save-buffer)
+   (should (= (length (org-social-vfile-test--requests-with "POST")) 3))
+   (should (equal org-social-vfile-test--retry-delays '(1.0 0.3)))
+   (should (equal org-social-vfile-test--remote org-social-vfile-test--feed))
+   (let ((conflicts (org-social-vfile-test--conflict-files)))
+     (should (= (length conflicts) 1))
+     (should (string-match-p ":MOOD: 👍" (org-social-vfile-test--read (car conflicts)))))
+   (should (equal (org-social-vfile-test--read (org-social-vfile-test--local))
+                  org-social-vfile-test--feed))
+   (should org-social-vfile-test--ediffs)
+   (should (eq (nth 2 (car org-social-vfile-test--warnings)) :error))))
+
+(ert-deftest org-social-vfile-test-vote-three-412-is-a-conflict ()
+  "A vote refused three times keeps the attempted version as conflict copy."
+  (org-social-vfile-test--with-host
+   (org-social-file--refresh-vfile-cache)
+   (setq org-social-vfile-test--upload-reply (org-social-vfile-test--412-always))
+   (org-social-ui--create-poll-vote "https://alice.example/social.org"
+                                    "2025-05-01T09:00:00+0100" "Yes")
+   (should (= (length (org-social-vfile-test--requests-with "POST")) 3))
+   (should (equal org-social-vfile-test--retry-delays '(1.0 0.3)))
+   (should (string-match-p ":POLL_OPTION: Yes"
+                           (org-social-vfile-test--read
+                            (car (org-social-vfile-test--conflict-files)))))
+   (should org-social-vfile-test--ediffs)))
+
+(ert-deftest org-social-vfile-test-manual-save-412-opens-ediff ()
+  "A file edited by hand is not retried: a 412 goes straight to ediff."
+  (org-social-vfile-test--with-host
+   (org-social-file--refresh-vfile-cache)
+   (find-file (org-social-vfile-test--local))
+   (org-social-mode 1)
+   (goto-char (point-min))
+   (search-forward "First post from Emacs")
+   (replace-match "First post, edited by hand")
+   (let ((android (concat org-social-vfile-test--feed org-social-vfile-test--android-post)))
+     (setq org-social-vfile-test--upload-reply (org-social-vfile-test--412-once android))
+     (save-buffer)
+     (should (= (length (org-social-vfile-test--requests-with "POST")) 1))
+     (should-not org-social-vfile-test--retry-delays)
+     (org-social-vfile-test--assert-conflict
+      (replace-regexp-in-string "First post from Emacs" "First post, edited by hand"
+                                org-social-vfile-test--feed)
+      android))))
+
+(ert-deftest org-social-vfile-test-new-post-plus-manual-edit-opens-ediff ()
+  "A new post plus a manual edit elsewhere is a conflict, not a retry."
+  (org-social-vfile-test--with-host
+   (org-social-file--refresh-vfile-cache)
+   (org-social-file--new-reaction "https://alice.example/social.org"
+                                  "2025-05-01T09:00:00+0100" "👍")
+   (goto-char (point-min))
+   (search-forward "First post from Emacs")
+   (replace-match "First post, edited by hand")
+   (setq org-social-vfile-test--remote
+         (concat org-social-vfile-test--feed org-social-vfile-test--android-post))
+   (save-buffer)
+   (should-not (org-social-vfile-test--requests-with "POST"))
+   (should (= (length (org-social-vfile-test--conflict-files)) 1))))
+
+(ert-deftest org-social-vfile-test-action-with-unsaved-buffer-is-refused ()
+  "A package action never mixes with unsaved manual edits."
+  (org-social-vfile-test--with-host
+   (let ((buf (org-social-vfile-test--open-with-unsaved-edit)))
+     (setq org-social-vfile-test--requests nil)
+     (with-temp-buffer
+       (should-error (org-social-ui--create-poll-vote "https://alice.example/social.org"
+                                                      "2025-05-01T09:00:00+0100" "Yes")
+                     :type 'user-error))
+     (should-not org-social-vfile-test--requests)
+     (should (equal org-social-vfile-test--remote org-social-vfile-test--feed))
+     (with-current-buffer buf
+       (should (buffer-modified-p))
+       (should (string-match-p "Unsaved draft" (buffer-string)))
+       (should-not (string-match-p "POLL_OPTION" (buffer-string)))))))
+
+(ert-deftest org-social-vfile-test-follow-and-unfollow ()
+  "Following and unfollowing change only the FOLLOW line of the latest feed."
+  (org-social-vfile-test--with-host
+   (org-social-file--refresh-vfile-cache)
+   (let ((android (concat org-social-vfile-test--feed org-social-vfile-test--android-post)))
+     (setq org-social-vfile-test--remote android)
+     (cl-letf (((symbol-function 'org-social-ui-discover) #'ignore))
+       (org-social-ui--follow-user "https://bob.example/social.org" "bob")
+       (should (string-match-p "^#\\+FOLLOW: bob https://bob.example/social.org\n\\(?:.\\|\n\\)*\\* Posts"
+                               org-social-vfile-test--remote))
+       (should (string-match-p "Post from Android" org-social-vfile-test--remote))
+       (org-social-ui--unfollow-user "https://bob.example/social.org" "bob"))
+     (should (equal org-social-vfile-test--remote android)))))
 
 (provide 'org-social-vfile-test)
 ;;; org-social-vfile-test.el ends here
